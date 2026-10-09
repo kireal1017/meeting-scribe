@@ -173,3 +173,47 @@ def test_file_source_realtime_pacing():
     n = sum(len(b) for b in src)
     assert n == 8000
     assert 0.45 <= time.monotonic() - t0 < 0.8
+
+
+class PausingSource:
+    """Feeds a fixture in 50 ms blocks and pauses/resumes the session at given seconds."""
+
+    def __init__(self, path, pause_at, resume_at):
+        self.blocks = list(FileSource(path, realtime=False))
+        self.pause_at, self.resume_at = pause_at, resume_at
+        self.session = None
+
+    def __iter__(self):
+        for i, b in enumerate(self.blocks):
+            t = i * 0.05
+            if abs(t - self.pause_at) < 0.025:
+                self.session.pause()
+            if abs(t - self.resume_at) < 0.025:
+                self.session.resume()
+            yield b
+
+
+def test_pause_skips_speech_but_keeps_timeline(tmp_path):
+    import json
+
+    import soundfile as sf
+
+    meta = json.loads((FIX / "meeting_tech.json").read_text(encoding="utf-8"))
+    s = meta["sentences"]
+    # pause from the gap before sentence 3 until the gap after sentence 4
+    pause_at = round((s[1]["end"] + s[2]["start"]) / 2, 2)
+    resume_at = round((s[3]["end"] + s[4]["start"]) / 2, 2)
+    src = PausingSource(FIX / "meeting_tech.wav", pause_at, resume_at)
+    sess = Session({"others": src}, FakeWhisper, FakeSherpa(), silero_vad_path(), tmp_path)
+    src.session = sess
+    events = []
+    sess.run(events.append)
+    finals = [e for e in events if e.type == "final"]
+    assert len(finals) == 5  # sentences 3 and 4 were said while paused
+    after = [f for f in finals if f.t_start > resume_at]
+    assert [round(f.t_start) for f in after] == [round(x["start"]) for x in s[4:]]
+    assert [e.text for e in events if e.type == "status"] == ["일시중지", "기록 재개"]
+    audio, _ = sf.read(str(next(tmp_path.glob("audio-others-*.flac"))), dtype="float32")
+    assert abs(len(audio) - len(np.concatenate(src.blocks))) < 1600  # aligned with timeline
+    paused = audio[int((pause_at + 0.1) * 16000):int((resume_at - 0.1) * 16000)]
+    assert np.abs(paused).max() == 0.0  # nothing recorded while paused

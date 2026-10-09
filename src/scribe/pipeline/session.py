@@ -77,6 +77,7 @@ class Session:
         self._last_final: dict[str, str] = {}
         self._backlog_s = 0.0
         self._backlog_lock = threading.Lock()
+        self._paused = threading.Event()
         self.started_mono = 0.0
 
     # --- public ----------------------------------------------------------
@@ -137,6 +138,22 @@ class Session:
         """Seconds of speech waiting for the GPU final pass."""
         return max(0.0, self._backlog_s)
 
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def pause(self) -> None:
+        """Stop listening without ending the session: open utterances are finalized, nothing
+        is transcribed, and the FLAC gets silence so it stays aligned with the timestamps."""
+        if not self._paused.is_set():
+            self._paused.set()
+            self._status("all", "일시중지", paused=True)
+
+    def resume(self) -> None:
+        if self._paused.is_set():
+            self._paused.clear()
+            self._status("all", "기록 재개", paused=False)
+
     def stop(self) -> None:
         for src in self.sources.values():
             stop = getattr(src, "stop", None)
@@ -176,8 +193,19 @@ class Session:
                 self.jobs.put(FinalJob(channel, ev.index, ev.start, ev.end, ev.audio, draft,
                                        time.monotonic()))
 
+        was_paused = False
         try:
             for block in source:
+                if self._paused.is_set():
+                    if not was_paused:  # finish whatever was being said when pause was hit
+                        for ev in seg.flush():
+                            handle(ev)
+                        was_paused = True
+                    if rec:
+                        rec.write(np.zeros_like(block))
+                    seg.skip(len(block))
+                    continue
+                was_paused = False
                 if rec:
                     rec.write(block)
                 for ev in seg.process(block):

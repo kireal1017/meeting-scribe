@@ -85,3 +85,13 @@ def test_silero_on_fixture_finds_every_sentence():
         covered = any(e.start / SAMPLE_RATE <= s["start"] + 0.3 and
                       e.end / SAMPLE_RATE >= s["end"] - 0.3 for e in ends)
         assert covered, s["text"]
+
+
+def test_skip_keeps_timestamps_aligned_and_ignores_skipped_audio():
+    seg = Segmenter(EnergyVAD())
+    run(seg, np.concatenate([tone(1), silence(1)]))  # one utterance at 0..1 s
+    seg.skip(int(3 * SAMPLE_RATE))  # 3 s paused (speech there is never seen)
+    ends = [e for e in run(seg, np.concatenate([tone(1), silence(1)])) if isinstance(e, SegmentEnd)]
+    assert len(ends) == 1
+    # resumes at 5 s; no pre-roll exists from before the pause, so the segment starts there
+    assert abs(ends[0].start / SAMPLE_RATE - 5.0) < 0.05

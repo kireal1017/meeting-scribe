@@ -116,6 +116,17 @@ class Segmenter:
             return []
         return [self._close(len(self._seg_frames) - self._silence_run, forced=False)]
 
+    def skip(self, n: int) -> None:
+        """Advance the timeline by n samples without listening (recording paused), so
+        timestamps after resuming stay relative to the session start. Call flush() first."""
+        self._pos += len(self._pending) + n
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._history.clear()
+        self._speech_run = 0
+        reset = getattr(self.vad, "reset", None)
+        if reset:
+            reset()
+
     # --- internals -------------------------------------------------------
     def _frame(self, frame: np.ndarray) -> list:
         prob = self.vad(frame)

@@ -31,17 +31,40 @@ class Engines(QObject):
         threading.Thread(target=self._load, name="engine-load", daemon=True).start()
 
     def _load(self) -> None:
+        """The draft model (CPU, ~9 s: ONNX graph parsing) and Whisper (GPU, ~7 s: CUDA init +
+        weights) are independent, so they load in parallel instead of back to back."""
         from scribe.asr.sherpa_stream import SherpaStreaming
         from scribe.asr.whisper_final import GpuUnavailableError, WhisperFinal
 
+        errors: list[BaseException] = []
+
+        def load_sherpa() -> None:
+            try:
+                self.sherpa = SherpaStreaming(self.partial_model)
+            except BaseException as e:  # reported below on the loader thread
+                errors.append(e)
+
+        t = threading.Thread(target=load_sherpa, name="sherpa-load", daemon=True)
+        t.start()
         try:
-            self.sherpa = SherpaStreaming(self.partial_model)
             self.whisper = WhisperFinal()
+            # cuBLAS/cuDNN warm-up (~2 s) while the draft model is still loading, so the first
+            # confirmed sentence of the meeting is not delayed by it
+            import numpy as np
+
+            self.whisper.transcribe(np.zeros(16_000, np.float32))
         except GpuUnavailableError as e:
+            t.join()
             self.failed.emit(str(e), True)
             return
         except Exception:
+            t.join()
             self.failed.emit(traceback.format_exc(), False)
+            return
+        t.join()
+        if errors:
+            e = errors[0]
+            self.failed.emit("".join(traceback.format_exception(type(e), e, e.__traceback__)), False)
             return
         self.ready.emit()
 
@@ -73,6 +96,18 @@ class SessionRunner(QObject):
         self._thread = threading.Thread(target=self._run, args=(sources, out_dir, hotwords),
                                         name="session", daemon=True)
         self._thread.start()
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.session and self.session.paused)
+
+    def pause(self) -> None:
+        if self.session:
+            self.session.pause()
+
+    def resume(self) -> None:
+        if self.session:
+            self.session.resume()
 
     def stop(self) -> None:
         if self.session:

@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -40,8 +42,11 @@ from PySide6.QtWidgets import (
 from scribe.gui import theme
 from scribe.gui.document import TranscriptView
 from scribe.gui.engine import DoctorRunner, Engines, GpuMonitor, SessionRunner
+from scribe.gui.icon import app_icon, set_windows_app_id
+from scribe.gui.mini import MiniWindow
 from scribe.store.transcript import clock, load, session_started
 
+log = logging.getLogger("scribe.gui")
 WEEKDAY = "월화수목금토일"
 LIVE = "__live__"
 
@@ -132,6 +137,12 @@ class MainWindow(QMainWindow):
         self.started: datetime | None = None
         self.live_dir: Path | None = None
         self._halted = False
+        self._engine_state = "loading"  # loading | ready | unavailable
+        self._saving = False
+        self.mini = MiniWindow()
+        self.mini.startPauseClicked.connect(self._start_or_pause)
+        self.mini.stopClicked.connect(self._stop)
+        self.mini.backClicked.connect(self._leave_mini)
 
         self._build()
         self._load_devices()
@@ -146,9 +157,11 @@ class MainWindow(QMainWindow):
         self.tick = QTimer(self, interval=1000)
         self.tick.timeout.connect(self._on_tick)
 
-        self.live.reset("새 회의록")
-        self.live.set_placeholder("엔진을 불러오는 중입니다… (처음 한 번은 30초 정도 걸립니다)")
+        for view in self._views():
+            view.reset("새 회의록")
+            view.set_placeholder("엔진을 불러오는 중입니다… (10~15초 정도 걸립니다)")
         self.status.setText("엔진 준비 중…")
+        self._sync_controls()
         self.engines.load()
         self.monitor.start()
 
@@ -239,12 +252,20 @@ class MainWindow(QMainWindow):
         self.start_btn = _button("준비 중…", "primary")
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._toggle)
+        self.pause_btn = _button("일시중지", "utility")
+        self.pause_btn.clicked.connect(self._pause_resume)
+        self.pause_btn.hide()
+        self.mini_btn = _button("미니 모드", "utility")
+        self.mini_btn.setToolTip("작은 세로 창으로 전환 (항상 위에 표시)")
+        self.mini_btn.clicked.connect(self._enter_mini)
         for w in (QLabel("상대"), self.loop_combo, self.mic_check, self.mic_combo):
             w.setFont(theme.font(14))
             h.addWidget(w)
         h.addStretch(1)
         h.addWidget(self.search)
         h.addSpacing(8)
+        h.addWidget(self.mini_btn)
+        h.addWidget(self.pause_btn)
         h.addWidget(self.start_btn)
         return bar
 
@@ -319,14 +340,19 @@ class MainWindow(QMainWindow):
 
     # --- engine / session ---------------------------------------------------
     def _engines_ready(self) -> None:
-        self.start_btn.setText("기록 시작")
-        self.start_btn.setEnabled(True)
-        self.live.set_placeholder("‘기록 시작’을 누르면 Zoom에서 들리는 소리를 받아적습니다.")
+        log.info("engines ready")
+        self._engine_state = "ready"
+        for view in self._views():
+            view.set_placeholder("‘기록 시작’을 누르면 연결된 스피커에서 들리는 소리를 받아적습니다.")
         self.status.setText("준비 완료")
+        self._sync_controls()
 
     def _engines_failed(self, message: str, gpu: bool) -> None:
-        self.start_btn.setText("기록 불가")
-        self.live.set_placeholder("엔진을 불러오지 못했습니다.")
+        log.error("engines failed (gpu=%s): %s", gpu, message)
+        self._engine_state = "unavailable"
+        self._sync_controls()
+        for view in self._views():
+            view.set_placeholder("엔진을 불러오지 못했습니다.")
         if gpu:
             self._show_callout("GPU를 사용할 수 없어 기록을 시작할 수 없습니다. "
                                "CPU로 대신 실행하지 않습니다 — 진단 창의 안내를 확인해 주세요.")
@@ -334,11 +360,86 @@ class MainWindow(QMainWindow):
         else:
             self._show_callout("엔진을 불러오지 못했습니다:\n" + message.strip().splitlines()[-1])
 
-    def _toggle(self) -> None:
+    # --- controls -------------------------------------------------------------
+    def _views(self) -> tuple[TranscriptView, TranscriptView]:
+        """The live page and its compact twin in the mini window; both always get every
+        event, so switching modes never needs a replay."""
+        return self.live, self.mini.view
+
+    def _toggle(self) -> None:  # main window start/stop button
         if self.runner.running:
-            self.start_btn.setEnabled(False)
-            self.start_btn.setText("저장 중…")
-            self.runner.stop()
+            self._stop()
+        else:
+            self._start()
+
+    def _start_or_pause(self) -> None:  # mini window: first nav button
+        if not self.runner.running:
+            self._start()
+        else:
+            self._pause_resume()
+
+    def _pause_resume(self) -> None:
+        if not self.runner.running or self._saving:
+            return
+        if self.runner.paused:
+            self.runner.resume()
+        else:
+            self.runner.pause()
+        self._sync_controls()
+        self._on_tick()
+
+    def _stop(self) -> None:
+        if not self.runner.running or self._saving:
+            return
+        self._saving = True
+        self.runner.stop()
+        self._sync_controls()
+
+    def _ui_state(self) -> str:
+        if self._engine_state != "ready":
+            return "unavailable" if self._engine_state == "unavailable" else "loading"
+        if self._saving:
+            return "saving"
+        if self.runner.running:
+            return "paused" if self.runner.paused else "recording"
+        return "idle"
+
+    def _sync_controls(self) -> None:
+        """One place that maps app state to both windows' controls."""
+        state = self._ui_state()
+        text, style, enabled = {
+            "loading": ("준비 중…", "primary", False),
+            "unavailable": ("기록 불가", "primary", False),
+            "saving": ("저장 중…", "stop", False),
+            "recording": ("■  기록 중지", "stop", True),
+            "paused": ("■  기록 중지", "stop", True),
+            "idle": ("기록 시작", "primary", True),
+        }[state]
+        self.start_btn.setText(text)
+        self.start_btn.setEnabled(enabled)
+        if self.start_btn.objectName() != style:
+            _restyle(self.start_btn, style)
+        self.pause_btn.setVisible(state in ("recording", "paused"))
+        self.pause_btn.setText("재개" if state == "paused" else "일시중지")
+        elapsed = clock((datetime.now() - self.started).total_seconds()) if self.started else ""
+        self.mini.set_state(state, elapsed)
+
+    def _enter_mini(self) -> None:
+        self._sync_controls()
+        self.mini.show()
+        self.mini.place_bottom_right()
+        self.mini.raise_()
+        self.mini.view.scroll_to_end()
+        self.hide()
+
+    def _leave_mini(self) -> None:
+        self.mini.hide()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _start(self) -> None:
+        if self._engine_state != "ready" or self.runner.running:
             return
         from scribe.audio.capture import LoopbackSource, MicSource
 
@@ -358,26 +459,32 @@ class MainWindow(QMainWindow):
             return
         self._halted = False
         self.callout.hide()
-        self.live.reset(f"회의록 {self.started:%Y-%m-%d %H:%M}", self.started)
-        self.live.set_placeholder("듣고 있습니다… 말소리가 들리면 여기에 바로 적힙니다.")
+        for view in self._views():
+            view.reset(f"회의록 {self.started:%Y-%m-%d %H:%M}", self.started)
+            view.set_placeholder("듣고 있습니다… 말소리가 들리면 여기에 바로 적힙니다.")
         self.stack.setCurrentWidget(self.live)
         self.runner.start(sources, self.live_dir)
+        log.info("recording started: %s (%s)", self.live_dir, ", ".join(sources))
         for w in (self.loop_combo, self.mic_combo, self.mic_check):
             w.setEnabled(False)
-        self.start_btn.setText("■  기록 중지")
-        _restyle(self.start_btn, "stop")
+        self._sync_controls()
         self._refresh_sessions()
         self.tick.start()
         self._on_tick()
 
     def _on_event(self, ev) -> None:
         if ev.type == "partial":
-            self.live.set_draft(ev.channel, ev.segment_id, ev.t_start, ev.text)
+            for view in self._views():
+                view.set_draft(ev.channel, ev.segment_id, ev.t_start, ev.text)
         elif ev.type == "final":
-            if ev.text:
-                self.live.add_final(ev.channel, ev.t_start, ev.text)
-            else:
-                self.live.drop_draft(ev.channel, ev.segment_id)
+            for view in self._views():
+                if ev.text:
+                    view.add_final(ev.channel, ev.t_start, ev.text)
+                else:
+                    view.drop_draft(ev.channel, ev.segment_id)
+        elif "paused" in ev.meta:
+            self._sync_controls()
+            self._on_tick()
         elif ev.meta.get("halted"):
             self._halted = True
             self._show_callout(ev.text)
@@ -387,12 +494,13 @@ class MainWindow(QMainWindow):
             self.status.setText(ev.text)
 
     def _on_finished(self, md: str) -> None:
+        log.info("recording finished: %s", md or "(not saved)")
         self.tick.stop()
         saved = self.live_dir
         self.live_dir = None
-        self.start_btn.setText("기록 시작")
-        self.start_btn.setEnabled(True)
-        _restyle(self.start_btn, "primary")
+        self._saving = False
+        self.started = None
+        self._sync_controls()
         self.mic_check.setEnabled(self.mic_combo.count() > 0)
         self.loop_combo.setEnabled(True)
         self.mic_combo.setEnabled(self.mic_check.isChecked())
@@ -401,17 +509,21 @@ class MainWindow(QMainWindow):
         self.status.setText(f"저장 완료 · {Path(md).parent}" if md else "기록이 저장되지 않았습니다")
 
     def _on_error(self, tb: str) -> None:
+        log.error("session error:\n%s", tb)
         self._show_callout("기록 중 오류가 발생했습니다:\n" + tb.strip().splitlines()[-1])
 
     def _on_tick(self) -> None:
         if not self.started:
             return
         elapsed = (datetime.now() - self.started).total_seconds()
-        self.live.update_properties(elapsed)
+        for view in self._views():
+            view.update_properties(elapsed)
         session = self.runner.session
         backlog = session.backlog_s if session else 0.0
         state = "GPU 중단됨" if self._halted else f"확정 대기 {backlog:.0f}초"
-        self.status.setText(f"●  기록 중  {clock(elapsed)}   ·   {state}")
+        lead = "❚❚  일시중지" if self.runner.paused else "●  기록 중"
+        self.status.setText(f"{lead}  {clock(elapsed)}   ·   {state}")
+        self.mini.set_state(self._ui_state(), clock(elapsed))
 
     def _on_gpu(self, s) -> None:
         if s is None:
@@ -430,6 +542,12 @@ class MainWindow(QMainWindow):
         self.callout.setText("⚠  " + text)
         self.callout.show()
 
+    def changeEvent(self, e) -> None:
+        if e.type() == e.Type.WindowStateChange:
+            log.info("main window state -> %s (spontaneous=%s)", self.windowState(),
+                     e.spontaneous())
+        super().changeEvent(e)
+
     def closeEvent(self, e) -> None:
         if self.runner.running:
             ans = QMessageBox.question(self, "기록 중", "기록을 중지하고 저장한 뒤 종료할까요?")
@@ -439,18 +557,53 @@ class MainWindow(QMainWindow):
             self.runner.stop()
             self.runner.join(15)
         self.monitor.stop()
+        self.mini.allow_close = True
+        self.mini.close()
         super().closeEvent(e)
+
+
+def _setup_logging() -> Path:
+    """scribe-gui.exe has no console: stdout/stderr are None and uncaught errors would vanish.
+    Send everything to logs/gui-<date>.log and show crashes in a dialog."""
+    from scribe.config import logs_dir
+
+    path = logs_dir() / f"gui-{datetime.now():%Y%m%d}.log"
+    logging.basicConfig(filename=path, encoding="utf-8", level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if sys.stdout is None or sys.stderr is None:
+        stream = open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        sys.stdout = sys.stdout or stream
+        sys.stderr = sys.stderr or stream
+
+    def hook(exc_type, exc, tb) -> None:
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log.error("uncaught exception:\n%s", text)
+        if QApplication.instance():
+            QMessageBox.critical(None, "meeting-scribe 오류",
+                                 f"{exc_type.__name__}: {exc}\n\n자세한 내용: {path}")
+
+    sys.excepthook = hook
+    return path
 
 
 def main(argv: list[str] | None = None, out_root: Path | None = None) -> int:
     from scribe.config import transcripts_dir
 
+    log_path = _setup_logging()
+    log.info("start (log: %s)", log_path)
+    set_windows_app_id()  # before any window exists, so the taskbar uses our icon
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
+    app.setWindowIcon(app_icon())  # title bar + taskbar, inherited by every window
     app.setStyleSheet(theme.STYLESHEET)
     app.setFont(theme.font(14))
     win = MainWindow(out_root or transcripts_dir())
     win.resize(1280, 820)
     win.show()
+    # Windows applies the launcher's show flag (e.g. hidden/minimized console, "run minimized"
+    # shortcut) to the first window shown; restore and focus explicitly.
+    win.showNormal()
+    win.raise_()
+    win.activateWindow()
     return app.exec()
 
 

@@ -56,8 +56,10 @@ def _char(px: int, color: str, weight=QFont.Weight.Normal, bg: str | None = None
 class TranscriptView(QTextBrowser):
     followChanged = Signal(bool)  # False when the user scrolled up away from the live end
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, compact: bool = False) -> None:
         super().__init__(parent)
+        # compact: phone-width layout (mini mode) - time/speaker on a small line above the text
+        self.compact = compact
         self.setObjectName("transcript")
         self.setOpenLinks(False)
         self.setFrameShape(QTextBrowser.Shape.NoFrame)
@@ -81,10 +83,10 @@ class TranscriptView(QTextBrowser):
         self._placeholder: str | None = None
         c = QTextCursor(doc)
         title_fmt = QTextBlockFormat()
-        title_fmt.setTopMargin(48)
-        title_fmt.setBottomMargin(8)
+        title_fmt.setTopMargin(16 if self.compact else 48)
+        title_fmt.setBottomMargin(4 if self.compact else 8)
         c.setBlockFormat(title_fmt)
-        c.insertText(title, _char(32, theme.INK, QFont.Weight.Bold))
+        c.insertText(title, _char(20 if self.compact else 32, theme.INK, QFont.Weight.Bold))
         props_fmt = QTextBlockFormat()
         props_fmt.setBottomMargin(6)
         c.insertBlock(props_fmt)
@@ -115,7 +117,8 @@ class TranscriptView(QTextBrowser):
         parts.append(f"발언 {self._count}개")
         c = QTextCursor(self.document().findBlockByNumber(1))
         c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-        c.insertText("     ".join(parts), _char(14, theme.INK_MUTED))
+        c.insertText(("   " if self.compact else "     ").join(parts),
+                     _char(12 if self.compact else 14, theme.INK_MUTED))
 
     # --- live content -----------------------------------------------------
     def add_final(self, channel: str, t_start: float, text: str, live: bool = True) -> None:
@@ -201,20 +204,27 @@ class TranscriptView(QTextBrowser):
     def _insert_utterance(self, c: QTextCursor, channel: str, t_start: float, text: str,
                           show_chip: bool, draft: bool) -> None:
         fmt = QTextBlockFormat()
-        fmt.setLeftMargin(GUTTER)
-        fmt.setTextIndent(-GUTTER)
-        fmt.setTabPositions([QTextOption.Tab(GUTTER, QTextOption.TabType.LeftTab)])
-        fmt.setTopMargin(14 if show_chip else 4)
+        if not self.compact:  # hanging indent: text column starts after the gutter
+            fmt.setLeftMargin(GUTTER)
+            fmt.setTextIndent(-GUTTER)
+            fmt.setTabPositions([QTextOption.Tab(GUTTER, QTextOption.TabType.LeftTab)])
+            fmt.setTopMargin(14 if show_chip else 4)
+        else:
+            fmt.setTopMargin(14 if show_chip else 8)
         fmt.setLineHeight(125, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
         c.insertBlock(fmt)
-        c.insertText("········" if draft else clock(t_start), _char(13, theme.INK_FAINT))
+        meta_px = 12 if self.compact else 13
+        c.insertText("········" if draft else clock(t_start), _char(meta_px, theme.INK_FAINT))
         if show_chip:
             bg, fg = theme.SPEAKER_CHIP.get(channel, (theme.CANVAS_SOFT, theme.INK_SECONDARY))
-            c.insertText("  ", _char(13, theme.INK_FAINT))
+            c.insertText("  ", _char(meta_px, theme.INK_FAINT))
             label = CHANNEL_LABEL.get(channel, channel)
-            c.insertText(f" {label} ", _char(13, fg, QFont.Weight.DemiBold, bg))
-        c.insertText("\t", _char(16, theme.INK))
-        c.insertText(text, _char(16, theme.INK_FAINT if draft else theme.INK))
+            c.insertText(f" {label} ", _char(meta_px, fg, QFont.Weight.DemiBold, bg))
+        # compact: a line separator keeps meta + text in ONE block (the draft region relies on
+        # exactly one block per utterance)
+        c.insertText(" " if self.compact else "\t", _char(16, theme.INK))
+        c.insertText(text, _char(15 if self.compact else 16,
+                                 theme.INK_FAINT if draft else theme.INK))
 
     def _render_drafts(self) -> None:
         c = QTextCursor(self.document())
@@ -244,6 +254,6 @@ class TranscriptView(QTextBrowser):
             self.followChanged.emit(follow)
 
     def resizeEvent(self, e) -> None:  # centre the page column
-        side = max(32, (self.width() - PAGE_WIDTH) // 2)
+        side = 18 if self.compact else max(32, (self.width() - PAGE_WIDTH) // 2)
         self.setViewportMargins(side, 0, side, 0)
         super().resizeEvent(e)

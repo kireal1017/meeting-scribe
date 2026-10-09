@@ -97,3 +97,56 @@ def test_engine_hands_out_preloaded_whisper_once(monkeypatch):
     assert e.whisper_factory() == "preloaded"
     assert e.whisper is None  # session owns it now; nothing pins the VRAM
     assert e.whisper_factory() == "fresh" and built == [1]
+
+
+def _load_sync(engines):
+    got = []
+    engines.ready.connect(lambda: got.append(("ready",)))
+    engines.failed.connect(lambda msg, gpu: got.append(("failed", gpu, msg)))
+    engines._load()  # run the loader inline (signals are direct within one thread)
+    return got
+
+
+class _FakeWhisper:
+    def __init__(self, *a, **k):
+        pass
+
+    def transcribe(self, audio):
+        return None
+
+
+def test_engines_load_both_in_parallel_and_report_ready(app, monkeypatch):
+    import scribe.asr.sherpa_stream as ss
+    import scribe.asr.whisper_final as wf
+
+    monkeypatch.setattr(ss, "SherpaStreaming", lambda *a, **k: "sherpa")
+    monkeypatch.setattr(wf, "WhisperFinal", _FakeWhisper)
+    e = Engines()
+    assert _load_sync(e) == [("ready",)]
+    assert e.sherpa == "sherpa" and isinstance(e.whisper, _FakeWhisper)
+
+
+def test_engines_gpu_failure_is_reported_as_gpu_problem(app, monkeypatch):
+    import scribe.asr.sherpa_stream as ss
+    import scribe.asr.whisper_final as wf
+
+    def no_gpu(*a, **k):
+        raise wf.GpuUnavailableError("CUDA GPU를 찾지 못했습니다")
+
+    monkeypatch.setattr(ss, "SherpaStreaming", lambda *a, **k: "sherpa")
+    monkeypatch.setattr(wf, "WhisperFinal", no_gpu)
+    got = _load_sync(Engines())
+    assert got == [("failed", True, "CUDA GPU를 찾지 못했습니다")]
+
+
+def test_engines_draft_model_failure_is_reported(app, monkeypatch):
+    import scribe.asr.sherpa_stream as ss
+    import scribe.asr.whisper_final as wf
+
+    def broken(*a, **k):
+        raise FileNotFoundError("tokens.txt")
+
+    monkeypatch.setattr(ss, "SherpaStreaming", broken)
+    monkeypatch.setattr(wf, "WhisperFinal", _FakeWhisper)
+    got = _load_sync(Engines())
+    assert got[0][0] == "failed" and got[0][1] is False and "tokens.txt" in got[0][2]

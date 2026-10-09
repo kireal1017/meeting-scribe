@@ -119,6 +119,26 @@ QScrollBar::handle:vertical:hover {{ background: #c4c1bc; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 
+/* mini mode: phone frame */
+#phone {{ background: {CANVAS}; border: 1px solid {HAIRLINE}; border-radius: 22px; }}
+#miniHeader {{ background: transparent; }}
+#handle {{ background: #dcdad6; border-radius: 2px; }}
+#statePill {{
+    background: {CANVAS_SOFT}; color: {INK_MUTED}; border-radius: 10px; padding: 3px 10px;
+}}
+#statePill[live="true"] {{ background: #e7f2fc; color: {PRIMARY_ACTIVE}; }}
+#navbar {{
+    background: {CANVAS}; border-top: 1px solid {HAIRLINE};
+    border-bottom-left-radius: 22px; border-bottom-right-radius: 22px;
+}}
+QToolButton#navButton {{
+    background: transparent; border: none; border-radius: 10px; color: {INK_SECONDARY};
+    padding: 4px 2px;
+}}
+QToolButton#navButton:hover {{ background: {CANVAS_SOFT}; }}
+QToolButton#navButton:pressed {{ background: {ROW_ACTIVE}; }}
+QToolButton#navButton:disabled {{ color: {INK_FAINT}; }}
+
 QDialog {{ background: {CANVAS}; }}
 QPlainTextEdit {{
     background: {CANVAS_SOFT}; border: 1px solid {HAIRLINE}; border-radius: 8px; padding: 8px;
