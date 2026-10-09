@@ -33,7 +33,8 @@ from scribe.gui import theme
 from scribe.store.transcript import clock, display_name, row_speaker_key, speaker_key
 
 GUTTER = 120  # px: timestamp + speaker chip column
-PAGE_WIDTH = 820  # px: centred text column, like a Notion page
+PAGE_WIDTH = 820  # px: text column, like a Notion page
+PAGE_LEFT = 56  # px: gap between the sidebar and the text column
 HEADER_BLOCKS = 3  # title, properties, spacer
 
 
@@ -56,6 +57,7 @@ def _char(px: int, color: str, weight=QFont.Weight.Normal, bg: str | None = None
 class TranscriptView(QTextBrowser):
     followChanged = Signal(bool)  # False when the user scrolled up away from the live end
     speakerClicked = Signal(str)  # speaker key ("others:A", "me") of a clicked chip
+    titleClicked = Signal()
 
     def __init__(self, parent=None, compact: bool = False) -> None:
         super().__init__(parent)
@@ -96,7 +98,7 @@ class TranscriptView(QTextBrowser):
         title_fmt.setTopMargin(16 if self.compact else 48)
         title_fmt.setBottomMargin(4 if self.compact else 8)
         c.setBlockFormat(title_fmt)
-        c.insertText(title, _char(20 if self.compact else 32, theme.INK, QFont.Weight.Bold))
+        self._insert_title(c)
         props_fmt = QTextBlockFormat()
         props_fmt.setBottomMargin(6)
         c.insertBlock(props_fmt)
@@ -106,6 +108,19 @@ class TranscriptView(QTextBrowser):
         c.insertBlock(spacer)
         self.update_properties()
         self._follow = True
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        c = QTextCursor(self.document().findBlockByNumber(0))
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        self._insert_title(c)
+
+    def _insert_title(self, c: QTextCursor) -> None:
+        fmt = _char(20 if self.compact else 32, theme.INK, QFont.Weight.Bold)
+        fmt.setAnchor(True)  # click the title to rename the meeting
+        fmt.setAnchorHref("title:")
+        fmt.setToolTip("클릭해서 제목 바꾸기")
+        c.insertText(self._title, fmt)
 
     def set_placeholder(self, text: str | None) -> None:
         """Grey hint shown in place of the transcript while it is empty (empty state)."""
@@ -144,10 +159,12 @@ class TranscriptView(QTextBrowser):
         self._last_speaker = key
         self._finals.append((key, channel, t_start, text))
         self._count += 1
+        if not live:  # bulk replay (load_rows / set_names): the caller refreshes once at the end
+            return
         self._drafts = {ch: d for ch, d in self._drafts.items() if ch != channel}
         self._render_drafts()
         self.update_properties()
-        if live and self._query:
+        if self._query:
             self.highlight(self._query)
         if follow:
             self.scroll_to_end()
@@ -174,6 +191,7 @@ class TranscriptView(QTextBrowser):
             for r in finals:
                 spk = row_speaker_key(r).partition(":")[2] or None
                 self.add_final(r["channel"], r["t_start"], r["text"], live=False, speaker=spk)
+            self._render_drafts()
             self.update_properties(finals[-1]["t_end"] if finals else None)
         finally:
             self.setUpdatesEnabled(True)
@@ -206,6 +224,8 @@ class TranscriptView(QTextBrowser):
         href = url.toString()
         if href.startswith("spk:"):
             self.speakerClicked.emit(href[4:])
+        elif href == "title:":
+            self.titleClicked.emit()
 
     # --- search -----------------------------------------------------------
     def highlight(self, query: str) -> int:
@@ -297,7 +317,11 @@ class TranscriptView(QTextBrowser):
             self._follow = follow
             self.followChanged.emit(follow)
 
-    def resizeEvent(self, e) -> None:  # centre the page column
-        side = 18 if self.compact else max(32, (self.width() - PAGE_WIDTH) // 2)
-        self.setViewportMargins(side, 0, side, 0)
+    def resizeEvent(self, e) -> None:  # page column starts close to the sidebar
+        if self.compact:
+            left = right = 18
+        else:
+            left = PAGE_LEFT
+            right = max(32, self.width() - PAGE_WIDTH - left)
+        self.setViewportMargins(left, 0, right, 0)
         super().resizeEvent(e)

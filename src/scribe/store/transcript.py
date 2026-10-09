@@ -17,6 +17,7 @@ def clock(t: float) -> str:
 
 CHANNEL_LABEL = {"others": "상대", "me": "나"}
 NAMES_FILE = "speakers.json"
+META_FILE = "meeting.json"  # {"title": ...} when the user renamed the page
 
 
 def speaker_key(channel: str, speaker: str | None = None) -> str:
@@ -44,14 +45,44 @@ def load_names(session_dir: Path) -> dict[str, str]:
 
 
 def save_names(session_dir: Path, names: dict[str, str]) -> None:
-    clean = {k: v.strip() for k, v in names.items() if v and v.strip()}
-    tmp = session_dir / (NAMES_FILE + ".tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(session_dir / NAMES_FILE)
+    _write_json(session_dir / NAMES_FILE,
+                {k: v.strip() for k, v in names.items() if v and v.strip()})
 
 
 def display_name(key: str, names: dict[str, str]) -> str:
     return names.get(key) or default_label(key)
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def default_title(started: datetime | None) -> str:
+    return f"회의록 {started:%Y-%m-%d %H:%M}" if started else "회의록"
+
+
+def load_title(session_dir: Path) -> str | None:
+    """User-given page title, or None for the default one (per meeting)."""
+    try:
+        title = json.loads((session_dir / META_FILE).read_text(encoding="utf-8")).get("title")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return title.strip() if isinstance(title, str) and title.strip() else None
+
+
+def save_title(session_dir: Path, title: str) -> None:
+    """Blank title -> back to the default ("회의록 YYYY-MM-DD HH:MM")."""
+    path = session_dir / META_FILE
+    if title.strip():
+        _write_json(path, {"title": title.strip()})
+    else:
+        path.unlink(missing_ok=True)
+
+
+def session_title(session_dir: Path) -> str:
+    return load_title(session_dir) or default_title(session_started(session_dir))
 
 
 class TranscriptStore:
@@ -110,7 +141,7 @@ def export_markdown(jsonl: Path, out: Path) -> Path:
                   key=lambda r: r["t_start"])
     names = load_names(jsonl.parent)  # renamed speakers ("상대 A" -> "김팀장") show up here too
     started = session_started(jsonl.parent)
-    title = f"회의록 {started:%Y-%m-%d %H:%M}" if started else "회의록"
+    title = session_title(jsonl.parent)
     props = []
     if started:
         props.append(f"📅 {started:%Y년 %m월 %d일 %H:%M}")
