@@ -6,7 +6,7 @@ import re
 from collections import deque
 from difflib import SequenceMatcher
 
-from scribe.asr.whisper_final import FinalResult
+from scribe.asr.types import FinalResult
 
 # Phrases Whisper is known to invent on silence/noise in Korean (YouTube/broadcast outros).
 HALLUCINATION_PATTERNS = [
@@ -45,13 +45,21 @@ class FinalFilter:
         self.recent: deque[str] = deque(maxlen=repeat_window)
         self.repeat_similarity = repeat_similarity
 
-    def check(self, r: FinalResult) -> str | None:
-        """Return a rejection reason, or None if the result should be kept."""
+    def check(self, r: FinalResult, draft: str = "") -> str | None:
+        """Return a rejection reason, or None if the result should be kept.
+
+        draft: the streaming draft of the same segment. Used only for text-only backends
+        (r.metrics False, e.g. some APIs), where the confidence checks below cannot run: if the
+        local recognizer heard nothing, a stock phrase or a 1-2 character result is treated as
+        noise. The draft is evidence for dropping, never text that is kept."""
         text = r.text.strip()
         if not _norm(text):
             return "empty"
         if any(p.search(text) for p in _HALLU):
             return "hallucination-phrase"
+        if not r.metrics and not _norm(draft) and (_WEAK_HALLU.match(text)
+                                                   or len(_norm(text)) <= 2):
+            return "no-speech"
         if _WEAK_HALLU.match(text) and (r.no_speech_prob > 0.2 or r.avg_logprob < -0.7):
             return "hallucination-phrase"
         if r.no_speech_prob > self.no_speech and r.avg_logprob < self.logprob:

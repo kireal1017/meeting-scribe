@@ -94,7 +94,7 @@ def main() -> None:
         v.update_properties(48)
     w._sync_controls()
     w._refresh_sessions()
-    for widget in (w.loop_combo, w.mic_combo, w.mic_check, w.record_check, w.model_combo):
+    for widget in (w.loop_combo, w.mic_combo, w.mic_check):
         widget.setEnabled(False)
     w.status.setText("●  기록 중  00:00:48   ·   확정 대기 0초")
     w.gpu.setText("RTX 2050   ·   VRAM 2.1 / 4 GB   ·   54°C")
@@ -113,7 +113,7 @@ def main() -> None:
     badge(p, 5, doc_point(w, w.live, chip_block.position() + 10) + QPoint(52, -16))
     row = w.sessions.itemWidget(w.sessions.item(2))
     badge(p, 6, pos_in(w, row.trash, row.trash.width() + 14, row.trash.height() // 2))
-    badge(p, 7, pos_in(w, w.record_check, w.record_check.width() - 30, -10))
+    badge(p, 7, pos_in(w, w.settings_btn, w.settings_btn.width() - 16, -6))
     p.end()
     OUT.mkdir(parents=True, exist_ok=True)
     pm.save(str(OUT / "main.png"))
@@ -123,7 +123,15 @@ def main() -> None:
     w.mini.grab().save(str(OUT / "mini.png"))
     w.mini.allow_close = True
     w.mini.close()
-    print("saved", OUT / "main.png", OUT / "mini.png")
+
+    from scribe.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(w.settings, w)  # the external API section, as when OpenRouter is chosen
+    dlg.engine.setCurrentIndex(dlg.engine.findData("openrouter"))
+    dlg.adjustSize()
+    app.processEvents()
+    dlg.grab().save(str(OUT / "settings.png"))
+    print("saved", OUT / "main.png", OUT / "mini.png", OUT / "settings.png")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,8 @@ Zoom 같은 온라인 회의를 **내 컴퓨터 안에서** 실시간으로 받�
 
 ## 요구 사항
 - Windows 10/11
-- NVIDIA GPU (VRAM 4GB 이상), 드라이버 525 이상. 확정 자막은 GPU에서만 동작하며 **CPU로 대신 실행하지 않습니다.**
+- NVIDIA GPU (VRAM 4GB 이상), 드라이버 525 이상. 확정 자막은 GPU에서 동작하며 **CPU로 대신 실행하지 않습니다.**
+  GPU가 없으면 확정 자막만 [외부 API](#외부-api로-확정-자막-gpu-없이)(OpenAI · OpenRouter)로 만들 수 있습니다(설정에서 직접 선택).
 - [uv](https://docs.astral.sh/uv/)
 
 ## 바로 실행 (더블클릭)
@@ -50,12 +51,16 @@ Zoom 같은 온라인 회의를 **내 컴퓨터 안에서** 실시간으로 받�
    맨 아래 회색 문장은 아직 확정 전이라 누가 말했는지 모르는 상태입니다(문장이 끝나면 확정 문장으로 바뀜).
 6. **지난 회의록 / 삭제**: 왼쪽 목록에서 지난 회의록을 열고 위쪽 검색창으로 찾을 수 있습니다.
    마우스를 올리면 나오는 🗑 버튼은 그 회의 폴더를 **휴지통**으로 옮깁니다(휴지통에서 복원 가능).
-7. **설정**
+7. **설정**: 왼쪽 아래 **설정** 버튼을 누르면 설정 창이 열립니다. **저장**을 눌러야 적용되고, 기록 중에는 열 수 없습니다.
    - **전체 음성 녹음 저장**: 켜면 회의가 끝날 때 `전체 녹음.flac`을 만들고, 끄면 음성 파일을 남기지 않습니다.
-   - **확정 자막 모델**: `빠름 · large-v3-turbo`(기본, 확정 약 1.5초, VRAM ~1.3GB) /
+   - **확정 자막 엔진**: `로컬 GPU`(기본) / `외부 API · OpenAI` / `외부 API · OpenRouter`
+     ([외부 API](#외부-api로-확정-자막-gpu-없이) 참고).
+   - **모델**(로컬 GPU): `빠름 · large-v3-turbo`(기본, 확정 약 1.5초, VRAM ~1.3GB) /
      `정확 · large-v3`(확정 약 3초, VRAM 최대 ~3.2GB, 처음 선택 시 약 3GB 다운로드).
      4GB GPU에서는 Zoom·브라우저와 함께 쓰면 메모리가 부족할 수 있습니다. 비교는 [docs/BENCHMARKS.md](docs/BENCHMARKS.md) 참고.
-   - 기록 중에는 설정을 바꿀 수 없습니다. 선택은 `%USERPROFILE%\.meeting-scribe\settings.json`에 저장됩니다.
+   - 선택은 `%USERPROFILE%\.meeting-scribe\settings.json`에 저장됩니다.
+
+   <img src="docs/images/settings.png" alt="설정 창 (외부 API · OpenRouter 선택)" width="420">
 
 아래 상태 줄에는 기록 시간, 확정 대기 시간(GPU가 밀린 정도), GPU 메모리·온도가 표시됩니다.
 GPU를 쓸 수 없으면 기록을 시작하지 않고 진단 창(`scribe doctor`)을 띄웁니다.
@@ -82,6 +87,36 @@ GPU를 쓸 수 없으면 기록을 시작하지 않고 진단 창(`scribe doctor
 상대 쪽 목소리를 문장마다 비교해 나눕니다. 한 사람이 몇 초 이상 이어서 말할 때 잘 구분되며,
 짧은 맞장구(2초 미만), 동시 발화, 한 문장 안에서 화자가 바뀌는 경우는 나누지 못합니다.
 라벨은 회의마다 `상대 A`부터 다시 매겨집니다.
+
+## 외부 API로 확정 자막 (GPU 없이)
+
+NVIDIA GPU가 없거나 쓰기 어려우면 확정 자막만 외부 API로 만들 수 있습니다. 임시 자막·화자 구분·녹음은
+그대로 이 컴퓨터에서 하고, **문장이 끝난 구간(1~15초)만** 선택한 서비스로 전송됩니다.
+
+1. 왼쪽 아래 **설정**을 열고 **엔진**에서 `외부 API · OpenAI` 또는 `외부 API · OpenRouter`를 고릅니다.
+2. 아래에 나타나는 **API 키** 칸에 키를 붙여 넣고, **연결 테스트**(1초 무음 전송)로 확인합니다.
+3. 필요하면 **모델**을 고른 뒤 **저장**을 누릅니다. 엔진은 저장할 때만 바뀝니다.
+
+| | OpenAI | OpenRouter |
+|---|---|---|
+| 모델 | `whisper-1`(기본), `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | `openai/whisper-large-v3-turbo`(기본), `openai/whisper-large-v3`, `openai/whisper-1`, 직접 입력 |
+| 직전 문장 문맥 | 사용 | 미지원 (용어·이름 정확도가 조금 낮을 수 있음) |
+| 무음 판별 정보 | `whisper-1`만 제공 | 제공 안 함 |
+| 개인정보 | — | **데이터 미보관(ZDR) 경로만 사용**(기본 켜짐, 설정 창에서 변경) |
+| 요금 표시 | 전송 분량만 표시 (요금은 OpenAI 요금표 확인) | 전송 분량과 요청별 요금 합계 |
+
+- **자동 전환 없음**: GPU가 안 된다고 API로 넘어가거나, API가 안 된다고 GPU로 넘어가는 일은 없습니다.
+  엔진은 사용자가 고른 것만 쓰며, 기록 중에는 바꿀 수 없습니다.
+- **키 저장**: 이 Windows 사용자만 풀 수 있게 암호화(DPAPI)해 `%USERPROFILE%\.meeting-scribe\api-keys.json`에
+  저장하며, 설정 파일·로그·회의록에는 남지 않습니다. 환경 변수 `MEETING_SCRIBE_OPENAI_API_KEY` /
+  `MEETING_SCRIBE_OPENROUTER_API_KEY`가 있으면 그 값을 먼저 씁니다(각 서비스는 자기 변수만 읽음).
+- **실패 처리**: 한 문장의 요청이 실패하면 그 자리에 `확정 실패` 표시와 임시 자막을 남깁니다(회의록 md에도
+  `⚠ 확정 실패`). 키 오류이거나 3번 연속 실패하면 확정 자막만 멈추고 임시 자막·녹음은 계속됩니다.
+  실패한 구간의 음성은 **전체 음성 녹음 저장**을 켠 경우에만 남습니다.
+- **한계**: 무음 판별 정보가 없는 모델은 잡음이 문장으로 남을 수 있어, 임시 자막이 아무것도 못 들은 구간의
+  짧은 결과(2글자 이하, "감사합니다" 등)는 버립니다. 이 때문에 임시 자막이 놓친 짧은 대답("네")이 빠질 수
+  있습니다. 요청마다 0.5~2초가 걸리고, 회의를 끝낼 때 남은 문장을 마저 보내느라 조금 기다릴 수 있습니다.
+- 회의 참석자에게 외부 서비스로 음성이 전송된다는 사실을 알리고 동의를 받으세요.
 
 ## 저장되는 파일
 회의마다 프로젝트의 `회의록\<시작시각>\` 폴더(예: `회의록\20261010-103000\`)에 저장됩니다.
@@ -113,7 +148,7 @@ flowchart TD
     end
 
     subgraph FIN["확정 작업 · 1개 공유"]
-        WH["확정 자막 (GPU)<br/>Whisper large-v3-turbo"]
+        WH["확정 자막<br/>GPU Whisper large-v3-turbo<br/>또는 외부 API (OpenAI · OpenRouter)"]
         SPK["화자 구분 A~J (CPU)<br/>3D-Speaker CAM++"]
     end
 
@@ -138,6 +173,7 @@ flowchart TD
 | 말소리 구간 감지 | Silero VAD v6 (faster-whisper에 포함) | CPU | 32ms 단위 판단, 문장 최대 15초 |
 | 임시 자막 | sherpa-onnx 스트리밍 Zipformer `kspon174m-c16` | CPU (스레드 2개) | RTF 0.2, 첫 글자 약 1초, CER 약 10% |
 | 확정 자막 | faster-whisper `large-v3-turbo` int8_float16 (선택: `large-v3`) | **GPU** | 문장 끝 후 약 1.4초, VRAM 약 1.3GB |
+| 확정 자막 (선택) | OpenAI / OpenRouter 음성 인식 API | 외부 서비스 | 설정에서 직접 골랐을 때만 ([외부 API](#외부-api로-확정-자막-gpu-없이)) |
 | 화자 구분 | 3D-Speaker CAM++ (27MB) | CPU | 문장당 +0.1~0.2초 |
 
 ### 흐름
@@ -159,7 +195,8 @@ flowchart TD
 |---|---|
 | `src/scribe/audio/` | 루프백·마이크 입력, FLAC 녹음, 전체 녹음 합치기 |
 | `src/scribe/vad/` | Silero VAD 문장 구간 자르기 |
-| `src/scribe/asr/` | 임시 자막(sherpa), 확정 자막(Whisper), 환각 필터 |
+| `src/scribe/asr/` | 임시 자막(sherpa), 확정 자막(Whisper / 외부 API, `backends.py`가 유일한 생성 지점), 환각 필터 |
+| `src/scribe/api_keys.py` | 외부 API 키 암호화 저장 (DPAPI) |
 | `src/scribe/diarize.py` | 화자 구분 A~J |
 | `src/scribe/pipeline/session.py` | 채널 작업·확정 작업 스레드와 이벤트 연결 |
 | `src/scribe/store/transcript.py` | jsonl 기록, md 내보내기, 이름·제목 저장 |
@@ -179,6 +216,8 @@ uv run scribe run --mic           # 내 마이크도 '나' 채널로 함께 전�
 uv run scribe run --out "$env:USERPROFILE\Documents\회의록"  # 결과 저장 폴더 지정 (기본: 프로젝트의 회의록 폴더)
 uv run scribe run --hotwords terms.txt      # 회의 용어(줄마다 1개)를 Whisper 프롬프트에 사용
 uv run scribe run --final-model large-v3    # 확정 자막 모델 지정 (기본: 화면에서 고른 설정)
+uv run scribe run --final-backend openai    # 확정 자막 엔진: local / openai / openrouter (기본: 화면 설정)
+uv run scribe run --final-backend openrouter --api-model openai/whisper-large-v3
 uv run scribe run --file a.wav --realtime   # 파일을 실시간 속도로 재생하며 전사
 uv run scribe bench whisper|sherpa|e2e      # 성능 측정 (docs/BENCHMARKS.md)
 ```

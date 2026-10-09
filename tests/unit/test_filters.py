@@ -1,5 +1,5 @@
 from scribe.asr.filters import FinalFilter
-from scribe.asr.whisper_final import FinalResult
+from scribe.asr.types import FinalResult
 
 
 def r(text, lp=-0.2, ns=0.01, cr=1.2):
@@ -37,3 +37,20 @@ def test_duplicate_long_lines_but_not_short_acks():
     assert f.check(r(line + ".")) == "duplicate"
     assert f.check(r("네.")) is None
     assert f.check(r("네.")) is None
+
+
+def test_text_only_results_use_the_draft_only_to_drop_noise():
+    f = FinalFilter()
+
+    def text_only(text):
+        return FinalResult(text, 0.0, 0.0, 1.0, metrics=False)
+
+    # the local recognizer heard nothing: a stock phrase / 1-2 chars is noise
+    assert f.check(text_only("감사합니다."), draft="") == "no-speech"
+    assert f.check(text_only("네"), draft="") == "no-speech"
+    # it heard something: keep the API text (the draft is never used as text)
+    assert f.check(text_only("네"), draft="네네") is None
+    assert f.check(text_only("감사합니다."), draft="감사합니다") is None
+    assert f.check(text_only("다음 주에 다시 보겠습니다"), draft="") is None
+    # results with Whisper metrics ignore the draft entirely
+    assert f.check(r("네"), draft="") is None

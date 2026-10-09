@@ -103,7 +103,7 @@ def test_engine_hands_out_preloaded_whisper_once(monkeypatch):
 def _load_sync(engines):
     got = []
     engines.ready.connect(lambda: got.append(("ready",)))
-    engines.failed.connect(lambda msg, gpu: got.append(("failed", gpu, msg)))
+    engines.failed.connect(lambda msg, kind: got.append(("failed", kind, msg)))
     engines._load()  # run the loader inline (signals are direct within one thread)
     return got
 
@@ -147,7 +147,7 @@ def test_engines_gpu_failure_is_reported_as_gpu_problem(app, monkeypatch):
     monkeypatch.setattr(wf, "WhisperFinal", no_gpu)
     _stub_speaker_model(monkeypatch)
     got = _load_sync(Engines())
-    assert got == [("failed", True, "CUDA GPU를 찾지 못했습니다")]
+    assert got == [("failed", "gpu", "CUDA GPU를 찾지 못했습니다")]
 
 
 def test_engines_draft_model_failure_is_reported(app, monkeypatch):
@@ -160,7 +160,7 @@ def test_engines_draft_model_failure_is_reported(app, monkeypatch):
     monkeypatch.setattr(ss, "SherpaStreaming", broken)
     monkeypatch.setattr(wf, "WhisperFinal", _FakeWhisper)
     got = _load_sync(Engines())
-    assert got[0][0] == "failed" and got[0][1] is False and "tokens.txt" in got[0][2]
+    assert got[0][0] == "failed" and got[0][1] == "other" and "tokens.txt" in got[0][2]
 
 
 def test_switch_final_frees_old_model_then_loads_selected(app, monkeypatch):
@@ -203,7 +203,7 @@ def test_runner_reports_not_running_inside_finished_handler(app, monkeypatch):
 
     class FakeSession:
         def __init__(self, *a, **k):
-            self.whisper = None
+            self.final = None
 
         def run(self, on_event):
             return "x/transcript.md"

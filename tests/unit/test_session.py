@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scribe.asr.whisper_final import FinalResult
+from scribe.asr.types import FinalResult
 from scribe.audio.capture import FileSource
 from scribe.models import silero_vad_path
 from scribe.pipeline.session import Session
@@ -217,3 +217,114 @@ def test_pause_skips_speech_but_keeps_timeline(tmp_path):
     assert abs(len(audio) - len(np.concatenate(src.blocks))) < 1600  # aligned with timeline
     paused = audio[int((pause_at + 0.1) * 16000):int((resume_at - 0.1) * 16000)]
     assert np.abs(paused).max() == 0.0  # nothing recorded while paused
+
+
+class FakeRemote(FakeWhisper):
+    """An API backend whose calls fail according to a script ("ok" / an exception)."""
+
+    remote = True
+    label = "OpenAI · whisper-1"
+
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+        self.draining = False
+
+    def set_draining(self):
+        self.draining = True
+
+    def transcribe(self, audio, prompt=None):
+        step = self.script.pop(0) if self.script else "ok"
+        if step != "ok":
+            self.prompts.append(prompt)
+            raise step
+        res = super().transcribe(audio, prompt)
+        res.meta = {"provider": "openai", "upload_s": 1.0}
+        return res
+
+
+def _remote_run(tmp_path, script):
+    made = []
+
+    def factory():
+        made.append(1)
+        return FakeRemote(script)
+
+    events, _ = run_session(tmp_path, factory, record=False)
+    return events, made
+
+
+def test_api_failure_leaves_marked_gap_and_never_rebuilds(tmp_path):
+    from scribe.asr.types import ApiTransientError
+
+    events, made = _remote_run(tmp_path, ["ok", ApiTransientError("timeout"), "ok"])
+    finals = [e for e in events if e.type == "final"]
+    assert len(made) == 1  # no restart / reload for an API backend
+    gap = finals[1]
+    assert gap.text == "" and gap.meta["rejected"] == "api-error"
+    assert gap.meta["draft"] == "초안 끝" and "timeout" in gap.meta["api_error"]
+    assert all(f.text for i, f in enumerate(finals) if i != 1)
+    assert finals[0].engine == "OpenAI · whisper-1" and finals[0].meta["provider"] == "openai"
+    status = [e for e in events if e.type == "status"]
+    assert [bool(e.meta.get("callout")) for e in status] == [True]  # one callout, no halt
+    rows = load(tmp_path / "transcript.jsonl")
+    assert sum(r["type"] == "final" and r["meta"].get("rejected") == "api-error" for r in rows) == 1
+
+
+def test_api_three_strikes_halt_and_success_resets(tmp_path):
+    from scribe.asr.types import ApiTransientError
+
+    t = ApiTransientError("HTTP 503")
+    events, made = _remote_run(tmp_path, [t, t, "ok", t, t, t])
+    finals = [e for e in events if e.type == "final"]
+    status = [e for e in events if e.type == "status"]
+    assert len(made) == 1
+    # fail, fail, ok (streak reset), fail, fail, fail -> halted; the 7th segment is skipped
+    assert [f.meta.get("rejected") for f in finals] == ["api-error", "api-error", None,
+                                                       "api-error", "api-error", "api-error"]
+    halts = [e for e in status if e.meta.get("halted")]
+    assert len(halts) == 1 and halts[0].meta.get("remote") and "외부 API" in halts[0].text
+    assert "scribe doctor" not in halts[0].text and "GPU" not in halts[0].text
+    assert sum(bool(e.meta.get("callout")) for e in status) == 2  # one per failure streak
+
+
+def test_api_auth_error_halts_immediately(tmp_path):
+    from scribe.asr.types import ApiAuthError
+
+    events, made = _remote_run(tmp_path, [ApiAuthError("API 키를 확인해 주세요")])
+    finals = [e for e in events if e.type == "final"]
+    assert len(made) == 1 and len(finals) == 1 and finals[0].meta["rejected"] == "api-error"
+    assert sum(bool(e.meta.get("halted")) for e in events if e.type == "status") == 1
+    assert [e for e in events if e.type == "partial"]  # drafts keep flowing
+
+
+def test_api_failure_does_not_feed_prompt_or_speakers(tmp_path):
+    from scribe.asr.types import ApiRequestError
+
+    w = FakeRemote(["ok", ApiRequestError("audio too short")])
+    assigned = []
+
+    class Tracker:
+        def assign(self, audio):
+            assigned.append(len(audio))
+            return "A"
+
+    src = FileSource(FIX / "meeting_planning.wav", realtime=False)
+    sess = Session({"others": src}, lambda: w, FakeSherpa(), silero_vad_path(), tmp_path,
+                   record=False, speakers=Tracker())
+    events = []
+    sess.run(events.append)
+    finals = [e for e in events if e.type == "final"]
+    assert len(assigned) == sum(bool(f.text) for f in finals) == 6
+    # the failed 2nd segment did not change the context: the 3rd prompt equals the 2nd
+    assert "확정" in w.prompts[1] and w.prompts[2] == w.prompts[1]
+    assert "speaker" not in finals[1].meta
+
+
+def test_stop_puts_api_backend_in_draining_mode(tmp_path):
+    w = FakeRemote([])
+    sess = Session({"others": SilentLiveSource()}, lambda: w, FakeSherpa(), silero_vad_path(),
+                   tmp_path, record=False)
+    threading.Timer(0.3, sess.stop).start()
+    sess.run()
+    assert w.draining and sess.whisper is w  # `whisper` stays as an alias of `final`

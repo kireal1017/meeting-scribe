@@ -14,6 +14,11 @@ meeting-scribe code is MIT-licensed. At runtime it downloads or loads the follow
 | NVIDIA cuBLAS / cuDNN (pip wheels) | CUDA runtime | NVIDIA EULA | [PyPI nvidia-*-cu12](https://pypi.org/project/nvidia-cudnn-cu12/) |
 | PyAudioWPatch | WASAPI loopback capture | MIT | [s0d3s/PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) |
 
+Optional external services (used only when the user selects them and agrees to upload audio):
+[OpenAI speech-to-text API](https://platform.openai.com/docs/guides/speech-to-text) and
+[OpenRouter audio transcription API](https://openrouter.ai/docs/guides/overview/multimodal/stt),
+subject to their own terms and data policies.
+
 Models are not redistributed in this repository; they are fetched from the sources above on first run.
 Test fixtures in `tests/fixtures` are synthesized with the Windows "Microsoft Heami" TTS voice from
 sentences written for this project (`scripts/make_fixtures.py`).

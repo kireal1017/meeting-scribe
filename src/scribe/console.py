@@ -62,9 +62,14 @@ class ConsoleView:
         self._end_line()
         if self.drafts.get(ev.channel, (None,))[0] == ev.segment_id:
             del self.drafts[ev.channel]
+        meta = ev.meta or {}
         if ev.text:
-            label = default_label(speaker_key(ev.channel, (ev.meta or {}).get("speaker")))
+            label = default_label(speaker_key(ev.channel, meta.get("speaker")))
             self.out.write(f"[{clock(ev.t_start)}] {label}: {ev.text}\n")
+        elif meta.get("rejected") == "api-error":  # marked gap: the API could not confirm it
+            draft = meta.get("draft") or ""
+            self.out.write(f"[{clock(ev.t_start)}] {default_label(ev.channel)}: ⚠ 확정 실패"
+                           f"{f' (임시: {draft})' if draft else ''}\n")
 
     def _end_line(self) -> None:
         if self.open_channel is not None:
