@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 from scribe.pipeline.events import Event
 
 
-def _clock(t: float) -> str:
+def clock(t: float) -> str:
     t = int(t)
     return f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
 
@@ -49,12 +50,51 @@ def load(jsonl: Path) -> list[dict]:
     return rows
 
 
+SECTION_S = 600  # a "### 10:00" heading every 10 minutes in meetings longer than that
+
+
+def session_started(session_dir: Path) -> datetime | None:
+    """Session folders are named by start time (YYYYmmdd-HHMMSS)."""
+    try:
+        return datetime.strptime(session_dir.name, "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
+
+
+def _duration(seconds: float) -> str:
+    s = int(seconds)
+    h, m, s = s // 3600, s % 3600 // 60, s % 60
+    return f"{h}시간 {m}분" if h else f"{m}분 {s}초"
+
+
 def export_markdown(jsonl: Path, out: Path) -> Path:
-    rows = [r for r in load(jsonl) if r["type"] == "final"]
-    rows.sort(key=lambda r: r["t_start"])
-    lines = ["# 회의 전사", ""]
+    """Notion-friendly page: title, a property line, then speaker-grouped paragraphs.
+    Importing the .md into Notion keeps headings, quote and inline-code timestamps."""
+    rows = sorted((r for r in load(jsonl) if r["type"] == "final" and r["text"]),
+                  key=lambda r: r["t_start"])
+    started = session_started(jsonl.parent)
+    title = f"회의록 {started:%Y-%m-%d %H:%M}" if started else "회의록"
+    props = []
+    if started:
+        props.append(f"📅 {started:%Y년 %m월 %d일 %H:%M}")
+    if rows:
+        props.append(f"⏱ {_duration(rows[-1]['t_end'])}")
+        speakers = dict.fromkeys(CHANNEL_LABEL.get(r["channel"], r["channel"]) for r in rows)
+        props.append("🗣 " + ", ".join(speakers))
+    props.append(f"발언 {len(rows)}개")
+    lines = [f"# {title}", "", "> " + " · ".join(props), "", "---", ""]
+
+    sections = bool(rows) and rows[-1]["t_end"] >= SECTION_S
+    section = speaker = None
     for r in rows:
+        if sections and int(r["t_start"] // SECTION_S) != section:
+            section = int(r["t_start"] // SECTION_S)
+            lines += [f"### {clock(section * SECTION_S)}", ""]
+            speaker = None
         who = CHANNEL_LABEL.get(r["channel"], r["channel"])
-        lines.append(f"- `{_clock(r['t_start'])}` **{who}**: {r['text']}")
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if who != speaker:
+            lines += [f"**{who}**", ""]
+            speaker = who
+        lines += [f"`{clock(r['t_start'])}` {r['text']}", ""]
+    out.write_text("\n".join(lines), encoding="utf-8")
     return out

@@ -98,6 +98,12 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_gui(args) -> int:
+    from scribe.gui.app import main as gui_main
+
+    return gui_main([sys.argv[0]], Path(args.out).resolve() if args.out else None)
+
+
 def cmd_bench(args) -> int:
     from scribe.bench import run as bench
 
@@ -136,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="결과 저장 폴더 (기본: 프로젝트의 회의록 폴더). 그 안에 <시작시각> 폴더가 생깁니다")
     r.add_argument("--partial-model", choices=PARTIAL_MODELS, default=DEFAULT_PARTIAL_MODEL)
     r.set_defaults(func=cmd_run)
+
+    g = sub.add_parser("gui", help="노션 스타일 데스크톱 화면으로 실행")
+    g.add_argument("--out", help="결과 저장 폴더 (기본: 프로젝트의 회의록 폴더)")
+    g.set_defaults(func=cmd_gui)
 
     b = sub.add_parser("bench", help="벤치마크 (tests/fixtures 사용)")
     b.add_argument("target", choices=["whisper", "sherpa", "e2e"])

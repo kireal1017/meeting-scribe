@@ -132,6 +132,11 @@ class Session:
             md = self.store.close()
         return md
 
+    @property
+    def backlog_s(self) -> float:
+        """Seconds of speech waiting for the GPU final pass."""
+        return max(0.0, self._backlog_s)
+
     def stop(self) -> None:
         for src in self.sources.values():
             stop = getattr(src, "stop", None)

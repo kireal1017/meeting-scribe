@@ -24,6 +24,17 @@ uv sync
 
 ## 사용법
 
+### 데스크톱 화면 (권장)
+```powershell
+uv run scribe gui
+```
+노션 스타일 창이 열립니다([docs/DESIGN-notion.md](docs/DESIGN-notion.md) 참고). 엔진을 미리 불러온 뒤
+**기록 시작**을 누르면, 회의록이 문서처럼 쌓입니다. 말하는 동안에는 회색 임시 문장이 맨 아래에 보이고,
+문장이 끝나면 확정 문장으로 바뀝니다. 왼쪽 목록에서 지난 회의록을 열고 검색할 수 있습니다.
+GPU를 쓸 수 없으면 기록을 시작하지 않고 진단 창(`scribe doctor`)을 띄웁니다.
+`.venv\Scripts\scribe-gui.exe` 로 콘솔 창 없이 실행할 수도 있습니다.
+
+### 명령줄
 ```powershell
 uv run scribe doctor              # GPU 환경 점검 (D1~D6)
 uv run scribe devices             # 오디오 장치 목록

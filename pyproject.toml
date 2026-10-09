@@ -16,10 +16,14 @@ dependencies = [
     "soxr>=0.3",
     "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
     "huggingface-hub>=0.23",
+    "pyside6-essentials>=6.7",
 ]
 
 [project.scripts]
 scribe = "scribe.cli:main"
+
+[project.gui-scripts]
+scribe-gui = "scribe.gui.app:main"  # no console window
 
 [tool.uv]
 # The Microsoft Store Python ignores venv site-packages; always use a uv-managed interpreter.

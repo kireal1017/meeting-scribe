@@ -11,13 +11,10 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
+from scribe.store.transcript import CHANNEL_LABEL as LABEL
+from scribe.store.transcript import clock
+
 GREY, RESET = "\x1b[90m", "\x1b[0m"
-LABEL = {"others": "상대", "me": "나"}
-
-
-def _clock(t: float) -> str:
-    t = int(t)
-    return f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
 
 
 def _new_part(shown: str, text: str) -> str:
@@ -67,7 +64,7 @@ class ConsoleView:
             del self.drafts[ev.channel]
         if ev.text:
             label = LABEL.get(ev.channel, ev.channel)
-            self.out.write(f"[{_clock(ev.t_start)}] {label}: {ev.text}\n")
+            self.out.write(f"[{clock(ev.t_start)}] {label}: {ev.text}\n")
 
     def _end_line(self) -> None:
         if self.open_channel is not None:
