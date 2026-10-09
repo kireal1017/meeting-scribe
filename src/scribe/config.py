@@ -44,5 +44,7 @@ def _ensure(p: Path) -> Path:
 
 # Whisper (final pass). GPU only — see asr/whisper_final.py.
 WHISPER_MODEL = "large-v3-turbo"
+# selectable final-pass models (faster-whisper names); all run on the GPU only
+FINAL_MODELS = ["large-v3-turbo", "large-v3", "large-v2"]
 WHISPER_COMPUTE_TYPE = "int8_float16"
 VRAM_BUDGET_MB = 3072

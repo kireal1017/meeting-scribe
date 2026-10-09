@@ -91,12 +91,13 @@ def test_engine_hands_out_preloaded_whisper_once(monkeypatch):
     import scribe.asr.whisper_final as wf
 
     built = []
-    monkeypatch.setattr(wf, "WhisperFinal", lambda: built.append(1) or "fresh")
-    e = Engines()
+    monkeypatch.setattr(wf, "WhisperFinal", lambda **k: built.append(k) or "fresh")
+    e = Engines(final_model="large-v3")
     e.whisper = "preloaded"
     assert e.whisper_factory() == "preloaded"
     assert e.whisper is None  # session owns it now; nothing pins the VRAM
-    assert e.whisper_factory() == "fresh" and built == [1]
+    assert e.whisper_factory() == "fresh"
+    assert built == [{"model": "large-v3"}]  # a restart rebuilds the *selected* model
 
 
 def _load_sync(engines):
@@ -115,12 +116,21 @@ class _FakeWhisper:
         return None
 
 
+def _stub_speaker_model(monkeypatch):
+    import scribe.diarize as dz
+    import scribe.models as models
+
+    monkeypatch.setattr(models, "speaker_model_path", lambda: "spk.onnx")
+    monkeypatch.setattr(dz, "SherpaEmbedder", lambda path: f"embedder({path})")
+
+
 def test_engines_load_both_in_parallel_and_report_ready(app, monkeypatch):
     import scribe.asr.sherpa_stream as ss
     import scribe.asr.whisper_final as wf
 
     monkeypatch.setattr(ss, "SherpaStreaming", lambda *a, **k: "sherpa")
     monkeypatch.setattr(wf, "WhisperFinal", _FakeWhisper)
+    _stub_speaker_model(monkeypatch)
     e = Engines()
     assert _load_sync(e) == [("ready",)]
     assert e.sherpa == "sherpa" and isinstance(e.whisper, _FakeWhisper)
@@ -135,6 +145,7 @@ def test_engines_gpu_failure_is_reported_as_gpu_problem(app, monkeypatch):
 
     monkeypatch.setattr(ss, "SherpaStreaming", lambda *a, **k: "sherpa")
     monkeypatch.setattr(wf, "WhisperFinal", no_gpu)
+    _stub_speaker_model(monkeypatch)
     got = _load_sync(Engines())
     assert got == [("failed", True, "CUDA GPU를 찾지 못했습니다")]
 
@@ -150,3 +161,120 @@ def test_engines_draft_model_failure_is_reported(app, monkeypatch):
     monkeypatch.setattr(wf, "WhisperFinal", _FakeWhisper)
     got = _load_sync(Engines())
     assert got[0][0] == "failed" and got[0][1] is False and "tokens.txt" in got[0][2]
+
+
+def test_switch_final_frees_old_model_then_loads_selected(app, monkeypatch):
+    import scribe.asr.whisper_final as wf
+
+    loaded = []
+
+    class Recorder(_FakeWhisper):
+        def __init__(self, model=None, **k):
+            loaded.append(model)
+
+    monkeypatch.setattr(wf, "WhisperFinal", Recorder)
+    e = Engines(final_model="large-v3-turbo")
+    e.whisper = "old"
+    got = []
+    e.ready.connect(lambda: got.append("ready"))
+    e.final_model = "large-v3"
+    e._switch()
+    assert loaded == ["large-v3"] and isinstance(e.whisper, Recorder) and got == ["ready"]
+
+
+def test_settings_roundtrip_and_bad_values(tmp_path, monkeypatch):
+    from scribe import settings
+
+    monkeypatch.setenv("MEETING_SCRIBE_HOME", str(tmp_path))
+    assert settings.load().final_model == "large-v3-turbo"  # default, no file yet
+    settings.save(settings.Settings(final_model="large-v3"))
+    assert settings.load().final_model == "large-v3"
+    (tmp_path / "settings.json").write_text('{"final_model": "tiny", "x": 1}', encoding="utf-8")
+    assert settings.load().final_model == "large-v3-turbo"  # unknown model -> default
+    (tmp_path / "settings.json").write_text("{broken", encoding="utf-8")
+    assert settings.load().final_model == "large-v3-turbo"
+
+
+def test_runner_reports_not_running_inside_finished_handler(app, monkeypatch):
+    """finished is emitted from the session thread; handlers must already see running=False
+    (otherwise the UI stays in "recording" and ignores model changes after a save)."""
+    import scribe.pipeline.session as sess_mod
+    from scribe.gui.engine import SessionRunner
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.whisper = None
+
+        def run(self, on_event):
+            return "x/transcript.md"
+
+    monkeypatch.setattr(sess_mod, "Session", FakeSession)
+    r = SessionRunner(Engines())
+    seen = []
+    r.finished.connect(lambda md: seen.append((md, r.running)))
+    r._active = True
+    r._run({}, None, "")
+    assert seen == [("x/transcript.md", False)]
+
+
+def test_chips_show_speaker_letters_names_and_are_clickable(view):
+    view.add_final("others", 1.0, "안건 시작합니다", speaker="A")
+    view.add_final("others", 4.0, "네 좋습니다", speaker="B")
+    view.add_final("me", 7.0, "동의합니다")
+    body = blocks(view)[HEADER_BLOCKS:]
+    assert "상대 A" in body[0] and "상대 B" in body[1] and "나" in body[2]
+    assert "상대 A, 상대 B, 나" in blocks(view)[1]  # properties line
+    clicked = []
+    view.speakerClicked.connect(clicked.append)
+    view.anchorClicked.emit(__import__("PySide6.QtCore", fromlist=["QUrl"]).QUrl("spk:others:B"))
+    assert clicked == ["others:B"]
+    view.set_draft("others", "others-000009", 9.0, "다음")  # live draft survives a rename
+    view.set_names({"others:A": "김팀장"})
+    body = blocks(view)[HEADER_BLOCKS:]
+    assert "김팀장" in body[0] and "상대 A" not in "".join(body)
+    assert body[-1].endswith("다음 …")
+    assert "김팀장, 상대 B, 나" in blocks(view)[1]
+
+
+def test_new_meeting_starts_without_previous_names(view):
+    view.set_names({"others:A": "김팀장"})
+    view.reset("다음 회의", names={})
+    view.add_final("others", 1.0, "안녕하세요", speaker="A")
+    assert "상대 A" in blocks(view)[HEADER_BLOCKS]
+
+
+def test_rename_flow_on_saved_meeting(app, tmp_path, monkeypatch):
+    import json
+
+    import scribe.gui.app as gui_app
+    from scribe.store.transcript import load_names
+
+    monkeypatch.setenv("MEETING_SCRIBE_HOME", str(tmp_path / "home"))  # never touch real settings
+    monkeypatch.setattr(gui_app.Engines, "load", lambda self: None)
+    monkeypatch.setattr(gui_app.GpuMonitor, "start", lambda self: None)
+    out = tmp_path / "회의록"
+    d = out / "20261010-103000"
+    d.mkdir(parents=True)
+    rows = [
+        {"type": "final", "channel": "others", "t_start": 1.0, "t_end": 3.0, "text": "시작합니다",
+         "meta": {"speaker": "A"}},
+        {"type": "final", "channel": "others", "t_start": 4.0, "t_end": 6.0, "text": "좋습니다",
+         "meta": {"speaker": "B"}},
+    ]
+    (d / "transcript.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+                                        encoding="utf-8")
+    w = gui_app.MainWindow(out)
+    item = w.sessions.item(0)
+    w._open_item(item)
+    monkeypatch.setattr(gui_app.QInputDialog, "getText", lambda *a, **k: ("김팀장", True))
+    w.archive.speakerClicked.emit("others:A")
+    assert load_names(d) == {"others:A": "김팀장"}
+    assert "김팀장" in w.archive.toPlainText()
+    md = (d / "transcript.md").read_text(encoding="utf-8")
+    assert "**김팀장**" in md and "**상대 B**" in md
+    # clearing the name returns to the default label
+    monkeypatch.setattr(gui_app.QInputDialog, "getText", lambda *a, **k: ("", True))
+    w.archive.speakerClicked.emit("others:A")
+    assert load_names(d) == {} and "상대 A" in w.archive.toPlainText()
+    w.mini.allow_close = True
+    w.mini.close()
