@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.omc/
+# meeting transcripts/recordings (default output of `scribe run`) must never be committed
+/회의록/
+/models/
