@@ -10,6 +10,7 @@ meeting-scribe code is MIT-licensed. At runtime it downloads or loads the follow
 | sherpa-onnx | streaming partial recognizer | Apache-2.0 | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) |
 | sherpa-onnx-streaming-zipformer-korean-2024-06-16 | partial model (option `zipformer-ko`) | see upstream release | [k2-fsa/sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) |
 | icefall-asr-ko-streaming-zipformer-174m | partial model (options `kspon174m-*`) | Apache-2.0 | [kangkyu/icefall-asr-ko-streaming-zipformer-174m](https://huggingface.co/kangkyu/icefall-asr-ko-streaming-zipformer-174m) |
+| 3D-Speaker CAM++ (`3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced`) | telling remote speakers apart (A..J) | Apache-2.0 | [modelscope/3D-Speaker](https://github.com/modelscope/3D-Speaker), [sherpa-onnx speaker models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) |
 | NVIDIA cuBLAS / cuDNN (pip wheels) | CUDA runtime | NVIDIA EULA | [PyPI nvidia-*-cu12](https://pypi.org/project/nvidia-cudnn-cu12/) |
 | PyAudioWPatch | WASAPI loopback capture | MIT | [s0d3s/PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) |
 

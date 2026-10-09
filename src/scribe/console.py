@@ -12,7 +12,7 @@ import sys
 from typing import TextIO
 
 from scribe.store.transcript import CHANNEL_LABEL as LABEL
-from scribe.store.transcript import clock
+from scribe.store.transcript import clock, default_label, speaker_key
 
 GREY, RESET = "\x1b[90m", "\x1b[0m"
 
@@ -63,7 +63,7 @@ class ConsoleView:
         if self.drafts.get(ev.channel, (None,))[0] == ev.segment_id:
             del self.drafts[ev.channel]
         if ev.text:
-            label = LABEL.get(ev.channel, ev.channel)
+            label = default_label(speaker_key(ev.channel, (ev.meta or {}).get("speaker")))
             self.out.write(f"[{clock(ev.t_start)}] {label}: {ev.text}\n")
 
     def _end_line(self) -> None:

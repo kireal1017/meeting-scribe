@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from scribe import config
 from scribe.config import SAMPLE_RATE
 from scribe.eval.cer import cer
 from scribe.models import DEFAULT_PARTIAL_MODEL
@@ -56,13 +57,14 @@ def _pct(xs: list[float], q: float) -> float:
     return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))]
 
 
-def bench_whisper(fixtures: list[Fixture], beam_size: int = 3) -> dict:
+def bench_whisper(fixtures: list[Fixture], beam_size: int = 3,
+                  model: str = config.WHISPER_MODEL) -> dict:
     from scribe.asr.whisper_final import WhisperFinal
     from scribe.diagnostics.gpu_monitor import VramSampler, gpu_query
 
     with VramSampler() as vram:
         t0 = time.perf_counter()
-        eng = WhisperFinal(beam_size=beam_size)
+        eng = WhisperFinal(model=model, beam_size=beam_size)
         load_s = time.perf_counter() - t0
         eng.transcribe(np.zeros(SAMPLE_RATE, np.float32))  # warm-up
         audio_s = infer_s = 0.0
@@ -80,7 +82,7 @@ def bench_whisper(fixtures: list[Fixture], beam_size: int = 3) -> dict:
                 hyps.append(r.text)
     q = gpu_query("name,temperature.gpu")
     return {
-        "engine": "faster-whisper large-v3-turbo int8_float16 (cuda)",
+        "engine": f"faster-whisper {model} {config.WHISPER_COMPUTE_TYPE} (cuda)",
         "beam_size": beam_size,
         "gpu": q[0] if q else "?",
         "load_s": round(load_s, 1),
@@ -138,7 +140,8 @@ def bench_sherpa(fixtures: list[Fixture], num_threads: int = 2,
 
 
 def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
-              model: str = DEFAULT_PARTIAL_MODEL) -> dict:
+              model: str = DEFAULT_PARTIAL_MODEL,
+              final_model: str = config.WHISPER_MODEL) -> dict:
     """Run the full pipeline on fixture files paced at real time; measure latency + CER."""
     from scribe.asr.sherpa_stream import SherpaStreaming
     from scribe.asr.whisper_final import WhisperFinal
@@ -147,7 +150,7 @@ def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
     from scribe.pipeline.session import Session
 
     sherpa = SherpaStreaming(model)
-    whisper = WhisperFinal()
+    whisper = WhisperFinal(model=final_model)
     whisper.transcribe(np.zeros(SAMPLE_RATE, np.float32))  # warm-up
     partial_lat, final_lat, refs, hyps = [], [], [], []
     per_clip = []

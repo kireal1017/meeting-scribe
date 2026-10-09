@@ -30,7 +30,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QTextBrowser, QTextEdit
 
 from scribe.gui import theme
-from scribe.store.transcript import CHANNEL_LABEL, clock
+from scribe.store.transcript import clock, display_name, row_speaker_key, speaker_key
 
 GUTTER = 120  # px: timestamp + speaker chip column
 PAGE_WIDTH = 820  # px: centred text column, like a Notion page
@@ -55,6 +55,7 @@ def _char(px: int, color: str, weight=QFont.Weight.Normal, bg: str | None = None
 
 class TranscriptView(QTextBrowser):
     followChanged = Signal(bool)  # False when the user scrolled up away from the live end
+    speakerClicked = Signal(str)  # speaker key ("others:A", "me") of a clicked chip
 
     def __init__(self, parent=None, compact: bool = False) -> None:
         super().__init__(parent)
@@ -68,15 +69,24 @@ class TranscriptView(QTextBrowser):
         self._follow = True
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._query = ""
+        self._names: dict[str, str] = {}
+        self.anchorClicked.connect(self._on_anchor)
         self.reset("회의록")
 
     # --- page -------------------------------------------------------------
-    def reset(self, title: str, started: datetime | None = None) -> None:
+    def reset(self, title: str, started: datetime | None = None,
+              names: dict[str, str] | None = None) -> None:
+        """New page. Speaker names belong to one meeting: pass them (or {}) for a new one;
+        None keeps the current names (used when redrawing)."""
+        if names is not None:
+            self._names = dict(names)
         doc = self.document()
         doc.clear()
+        self._title = title
         self._started = started
         self._duration_s: float | None = None
-        self._speakers: list[str] = []
+        self._speakers: list[str] = []  # speaker keys in order of first appearance
+        self._finals: list[tuple[str, str, float, str]] = []  # (key, channel, t, text)
         self._count = 0
         self._last_speaker: str | None = None
         self._drafts: dict[str, Draft] = {}
@@ -113,7 +123,7 @@ class TranscriptView(QTextBrowser):
             parts.append(f"⏱ {s // 3600}시간 {s % 3600 // 60}분" if s >= 3600
                          else f"⏱ {s // 60}분 {s % 60}초")
         if self._speakers:
-            parts.append("🗣 " + ", ".join(self._speakers))
+            parts.append("🗣 " + ", ".join(display_name(k, self._names) for k in self._speakers))
         parts.append(f"발언 {self._count}개")
         c = QTextCursor(self.document().findBlockByNumber(1))
         c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
@@ -121,16 +131,18 @@ class TranscriptView(QTextBrowser):
                      _char(12 if self.compact else 14, theme.INK_MUTED))
 
     # --- live content -----------------------------------------------------
-    def add_final(self, channel: str, t_start: float, text: str, live: bool = True) -> None:
+    def add_final(self, channel: str, t_start: float, text: str, live: bool = True,
+                  speaker: str | None = None) -> None:
         follow = live and self._at_end()
-        label = CHANNEL_LABEL.get(channel, channel)
-        if label not in self._speakers:
-            self._speakers.append(label)
+        key = speaker_key(channel, speaker)
+        if key not in self._speakers:
+            self._speakers.append(key)
         c = QTextCursor(self.document())
         c.setPosition(self._draft_pos())
-        self._insert_utterance(c, channel, t_start, text, show_chip=label != self._last_speaker,
+        self._insert_utterance(c, key, t_start, text, show_chip=key != self._last_speaker,
                                draft=False)
-        self._last_speaker = label
+        self._last_speaker = key
+        self._finals.append((key, channel, t_start, text))
         self._count += 1
         self._drafts = {ch: d for ch, d in self._drafts.items() if ch != channel}
         self._render_drafts()
@@ -160,12 +172,40 @@ class TranscriptView(QTextBrowser):
         self.setUpdatesEnabled(False)
         try:
             for r in finals:
-                self.add_final(r["channel"], r["t_start"], r["text"], live=False)
+                spk = row_speaker_key(r).partition(":")[2] or None
+                self.add_final(r["channel"], r["t_start"], r["text"], live=False, speaker=spk)
             self.update_properties(finals[-1]["t_end"] if finals else None)
         finally:
             self.setUpdatesEnabled(True)
         # open at the title; deferred because the layout of a just-shown page is not final yet
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(0))
+
+    # --- speaker names ----------------------------------------------------
+    def set_names(self, names: dict[str, str]) -> None:
+        """Show user-given names ("상대 A" -> "김팀장"); redraws the page in place."""
+        self._names = dict(names)
+        bar = self.verticalScrollBar()
+        pos, follow = bar.value(), self._at_end()
+        title, started, duration = self._title, self._started, self._duration_s
+        finals, drafts, placeholder = self._finals, self._drafts, self._placeholder
+        self.setUpdatesEnabled(False)
+        try:
+            self.reset(title, started)
+            for key, channel, t, text in finals:
+                self.add_final(channel, t, text, live=False, speaker=key.partition(":")[2] or None)
+            self._drafts, self._placeholder = drafts, placeholder
+            self._render_drafts()
+            self.update_properties(duration)
+            if self._query:
+                self.highlight(self._query)
+        finally:
+            self.setUpdatesEnabled(True)
+        bar.setValue(bar.maximum() if follow else pos)
+
+    def _on_anchor(self, url) -> None:
+        href = url.toString()
+        if href.startswith("spk:"):
+            self.speakerClicked.emit(href[4:])
 
     # --- search -----------------------------------------------------------
     def highlight(self, query: str) -> int:
@@ -201,7 +241,7 @@ class TranscriptView(QTextBrowser):
         block = self.document().findBlockByNumber(HEADER_BLOCKS - 1 + self._count)
         return block.position() + block.length() - 1
 
-    def _insert_utterance(self, c: QTextCursor, channel: str, t_start: float, text: str,
+    def _insert_utterance(self, c: QTextCursor, key: str, t_start: float, text: str,
                           show_chip: bool, draft: bool) -> None:
         fmt = QTextBlockFormat()
         if not self.compact:  # hanging indent: text column starts after the gutter
@@ -216,10 +256,14 @@ class TranscriptView(QTextBrowser):
         meta_px = 12 if self.compact else 13
         c.insertText("········" if draft else clock(t_start), _char(meta_px, theme.INK_FAINT))
         if show_chip:
-            bg, fg = theme.SPEAKER_CHIP.get(channel, (theme.CANVAS_SOFT, theme.INK_SECONDARY))
+            bg, fg = theme.speaker_chip(key)
             c.insertText("  ", _char(meta_px, theme.INK_FAINT))
-            label = CHANNEL_LABEL.get(channel, channel)
-            c.insertText(f" {label} ", _char(meta_px, fg, QFont.Weight.DemiBold, bg))
+            chip = _char(meta_px, fg, QFont.Weight.DemiBold, bg)
+            if not draft:  # click the chip to rename this speaker
+                chip.setAnchor(True)
+                chip.setAnchorHref(f"spk:{key}")
+                chip.setToolTip("클릭해서 이름 바꾸기")
+            c.insertText(f" {display_name(key, self._names)} ", chip)
         # compact: a line separator keeps meta + text in ONE block (the draft region relies on
         # exactly one block per utterance)
         c.insertText(" " if self.compact else "\t", _char(16, theme.INK))
@@ -231,7 +275,7 @@ class TranscriptView(QTextBrowser):
         c.setPosition(self._draft_pos())
         c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
         c.removeSelectedText()
-        for ch, d in self._drafts.items():
+        for ch, d in self._drafts.items():  # who is speaking is known only once confirmed
             self._insert_utterance(c, ch, d.t_start, d.text + " …", show_chip=True, draft=True)
         if self._placeholder and not self._count and not self._drafts:
             fmt = QTextBlockFormat()

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -39,16 +40,35 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from scribe import settings
 from scribe.gui import theme
 from scribe.gui.document import TranscriptView
 from scribe.gui.engine import DoctorRunner, Engines, GpuMonitor, SessionRunner
 from scribe.gui.icon import app_icon, set_windows_app_id
 from scribe.gui.mini import MiniWindow
-from scribe.store.transcript import clock, load, session_started
+from scribe.store.transcript import (
+    clock,
+    default_label,
+    display_name,
+    export_markdown,
+    load,
+    load_names,
+    save_names,
+    session_started,
+)
 
 log = logging.getLogger("scribe.gui")
 WEEKDAY = "월화수목금토일"
 LIVE = "__live__"
+# final-pass choices shown in the sidebar: (label, faster-whisper model, tooltip)
+FINAL_CHOICES = [
+    ("빠름 · large-v3-turbo", "large-v3-turbo",
+     "권장. 문장 확정 약 1.5초, VRAM 약 1.3GB."),
+    ("정확 · large-v3", "large-v3",
+     "대화체 인식이 조금 더 좋을 수 있지만 문장 확정 약 3초, VRAM 최대 약 3.2GB.\n"
+     "Zoom·브라우저가 GPU를 함께 쓰면 메모리가 부족해 확정 자막이 멈출 수 있습니다.\n"
+     "처음 선택하면 모델(약 3GB)을 내려받습니다."),
+]
 
 
 def _session_label(started: datetime) -> str:
@@ -131,16 +151,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.out_root = out_root
         self.setWindowTitle("meeting-scribe")
-        self.engines = Engines()
+        self.settings = settings.load()
+        self.engines = Engines(final_model=self.settings.final_model)
         self.runner = SessionRunner(self.engines)
         self.monitor = GpuMonitor()
         self.started: datetime | None = None
         self.live_dir: Path | None = None
+        self.shown_live_dir: Path | None = None  # meeting on the live page (kept after saving)
+        self.archive_dir: Path | None = None  # meeting open on the archive page
         self._halted = False
         self._engine_state = "loading"  # loading | ready | unavailable
         self._saving = False
         self.mini = MiniWindow()
         self.mini.startPauseClicked.connect(self._start_or_pause)
+        self.mini.view.speakerClicked.connect(
+            lambda key: self._rename_speaker(key, self.mini.view))
         self.mini.stopClicked.connect(self._stop)
         self.mini.backClicked.connect(self._leave_mini)
 
@@ -190,6 +215,8 @@ class MainWindow(QMainWindow):
 
         self.live = TranscriptView()
         self.archive = TranscriptView()
+        self.live.speakerClicked.connect(lambda key: self._rename_speaker(key, self.live))
+        self.archive.speakerClicked.connect(lambda key: self._rename_speaker(key, self.archive))
         self.stack = QStackedWidget()
         self.stack.addWidget(self.live)
         self.stack.addWidget(self.archive)
@@ -224,9 +251,35 @@ class MainWindow(QMainWindow):
         self.sessions.itemClicked.connect(self._open_item)
         folder = _button("폴더 열기", "utility")
         folder.clicked.connect(lambda: os.startfile(self.out_root))  # noqa: S606
+        settings_title = QLabel("설정", objectName="sidebarTitle")
+        settings_title.setFont(theme.font(12, QFont.Weight.DemiBold, 0.125))
+        self.record_check = QCheckBox("전체 음성 녹음 저장")
+        self.record_check.setFont(theme.font(13))
+        self.record_check.setToolTip(
+            "켜면 회의가 끝날 때 상대와 나를 합친 ‘전체 녹음.flac’을 회의록 폴더에 저장합니다.\n"
+            "끄면 음성은 저장하지 않고 회의록(글)만 남습니다.")
+        self.record_check.setChecked(self.settings.record_audio)
+        self.record_check.toggled.connect(self._on_record_toggled)
+        model_title = QLabel("확정 자막 모델")
+        model_title.setStyleSheet(f"color: {theme.INK_MUTED};")
+        model_title.setFont(theme.font(12))
+        self.model_combo = QComboBox()
+        self.model_combo.setFont(theme.font(13))
+        for i, (label, model, tip) in enumerate(FINAL_CHOICES):
+            self.model_combo.addItem(label, model)
+            self.model_combo.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
+            if model == self.settings.final_model:
+                self.model_combo.setCurrentIndex(i)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         v.addWidget(brand)
         v.addWidget(title)
         v.addWidget(self.sessions, 1)
+        v.addWidget(settings_title)
+        v.addWidget(self.record_check)
+        v.addSpacing(2)
+        v.addWidget(model_title)
+        v.addWidget(self.model_combo)
+        v.addSpacing(6)
         v.addWidget(folder)
         return side
 
@@ -329,7 +382,9 @@ class MainWindow(QMainWindow):
         else:
             d = Path(key)
             started = session_started(d)
-            self.archive.reset(f"회의록 {started:%Y-%m-%d %H:%M}" if started else d.name, started)
+            self.archive_dir = d
+            self.archive.reset(f"회의록 {started:%Y-%m-%d %H:%M}" if started else d.name, started,
+                               names=load_names(d))
             self.archive.load_rows(load(d / "transcript.jsonl"))
             self.stack.setCurrentWidget(self.archive)
         self.jump.hide()
@@ -344,7 +399,7 @@ class MainWindow(QMainWindow):
         self._engine_state = "ready"
         for view in self._views():
             view.set_placeholder("‘기록 시작’을 누르면 연결된 스피커에서 들리는 소리를 받아적습니다.")
-        self.status.setText("준비 완료")
+        self.status.setText(f"준비 완료 · 확정 모델 {self.engines.final_model}")
         self._sync_controls()
 
     def _engines_failed(self, message: str, gpu: bool) -> None:
@@ -353,7 +408,12 @@ class MainWindow(QMainWindow):
         self._sync_controls()
         for view in self._views():
             view.set_placeholder("엔진을 불러오지 못했습니다.")
-        if gpu:
+        if gpu and self.engines.final_model != FINAL_CHOICES[0][1]:
+            # most likely the bigger model does not fit next to other GPU users: offer the way back
+            self._show_callout(f"{self.engines.final_model} 모델을 GPU에 올리지 못했습니다 ({message}). "
+                               "왼쪽 아래 ‘확정 자막 모델’을 ‘빠름’으로 바꾸거나, GPU를 쓰는 다른 "
+                               "프로그램을 닫고 다시 선택해 주세요.")
+        elif gpu:
             self._show_callout("GPU를 사용할 수 없어 기록을 시작할 수 없습니다. "
                                "CPU로 대신 실행하지 않습니다 — 진단 창의 안내를 확인해 주세요.")
             GpuDialog(message, self).exec()
@@ -420,9 +480,59 @@ class MainWindow(QMainWindow):
         if self.start_btn.objectName() != style:
             _restyle(self.start_btn, style)
         self.pause_btn.setVisible(state in ("recording", "paused"))
+        self.model_combo.setEnabled(state in ("idle", "unavailable"))
+        self.record_check.setEnabled(state not in ("recording", "paused", "saving"))
         self.pause_btn.setText("재개" if state == "paused" else "일시중지")
         elapsed = clock((datetime.now() - self.started).total_seconds()) if self.started else ""
         self.mini.set_state(state, elapsed)
+
+    def _on_model_changed(self, _index: int) -> None:
+        model = self.model_combo.currentData()
+        if model == self.engines.final_model or self.runner.running:
+            return
+        log.info("final model -> %s", model)
+        self.settings.final_model = model
+        settings.save(self.settings)
+        self.callout.hide()
+        self._engine_state = "loading"
+        self._sync_controls()
+        self.status.setText(f"확정 모델 변경 중: {model}… (처음이면 모델을 내려받습니다)")
+        for view in self._views():
+            view.set_placeholder(f"확정 자막 모델을 {model}(으)로 바꾸는 중입니다…")
+        self.engines.switch_final(model)
+
+    def _on_record_toggled(self, on: bool) -> None:
+        self.settings.record_audio = on
+        settings.save(self.settings)
+        log.info("record_audio -> %s", on)
+
+    def _rename_speaker(self, key: str, view: TranscriptView) -> None:
+        """Chip clicked: name this speaker for this meeting ("상대 A" -> "김팀장")."""
+        session_dir = self.archive_dir if view is self.archive else self.shown_live_dir
+        if session_dir is None:
+            return
+        names = load_names(session_dir)
+        current, default = display_name(key, names), default_label(key)
+        parent = self.mini if self.mini.isVisible() else self
+        text, ok = QInputDialog.getText(
+            parent, "이름 바꾸기",
+            f"‘{current}’의 이름을 입력하세요.\n비우면 기본값 ‘{default}’로 돌아갑니다.",
+            text=names.get(key, ""))
+        if not ok:
+            return
+        names[key] = text.strip()
+        save_names(session_dir, names)
+        names = load_names(session_dir)  # normalised: blanks removed
+        log.info("speaker %s -> %s (%s)", key, display_name(key, names), session_dir.name)
+        if session_dir == self.shown_live_dir:
+            for v in self._views():
+                v.set_names(names)
+        if session_dir == self.archive_dir:
+            self.archive.set_names(names)
+        live_running = self.runner.running and session_dir == self.live_dir
+        jsonl = session_dir / "transcript.jsonl"
+        if not live_running and jsonl.exists():  # a running meeting exports with names at the end
+            export_markdown(jsonl, session_dir / "transcript.md")
 
     def _enter_mini(self) -> None:
         self._sync_controls()
@@ -460,10 +570,11 @@ class MainWindow(QMainWindow):
         self._halted = False
         self.callout.hide()
         for view in self._views():
-            view.reset(f"회의록 {self.started:%Y-%m-%d %H:%M}", self.started)
+            view.reset(f"회의록 {self.started:%Y-%m-%d %H:%M}", self.started, names={})
             view.set_placeholder("듣고 있습니다… 말소리가 들리면 여기에 바로 적힙니다.")
         self.stack.setCurrentWidget(self.live)
-        self.runner.start(sources, self.live_dir)
+        self.shown_live_dir = self.live_dir
+        self.runner.start(sources, self.live_dir, record=self.settings.record_audio)
         log.info("recording started: %s (%s)", self.live_dir, ", ".join(sources))
         for w in (self.loop_combo, self.mic_combo, self.mic_check):
             w.setEnabled(False)
@@ -479,7 +590,8 @@ class MainWindow(QMainWindow):
         elif ev.type == "final":
             for view in self._views():
                 if ev.text:
-                    view.add_final(ev.channel, ev.t_start, ev.text)
+                    view.add_final(ev.channel, ev.t_start, ev.text,
+                                   speaker=ev.meta.get("speaker"))
                 else:
                     view.drop_draft(ev.channel, ev.segment_id)
         elif "paused" in ev.meta:

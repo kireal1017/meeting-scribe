@@ -16,6 +16,42 @@ def clock(t: float) -> str:
 
 
 CHANNEL_LABEL = {"others": "상대", "me": "나"}
+NAMES_FILE = "speakers.json"
+
+
+def speaker_key(channel: str, speaker: str | None = None) -> str:
+    """Stable id of who spoke: "me", "others:A".."others:J", or "others" when unknown."""
+    return f"{channel}:{speaker}" if speaker else channel
+
+
+def row_speaker_key(row: dict) -> str:
+    return speaker_key(row["channel"], (row.get("meta") or {}).get("speaker"))
+
+
+def default_label(key: str) -> str:
+    channel, _, letter = key.partition(":")
+    base = CHANNEL_LABEL.get(channel, channel)
+    return f"{base} {letter}" if letter else base
+
+
+def load_names(session_dir: Path) -> dict[str, str]:
+    """User-given names per speaker key, e.g. {"others:A": "김팀장"} (per meeting)."""
+    try:
+        data = json.loads((session_dir / NAMES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str) and v.strip()}
+
+
+def save_names(session_dir: Path, names: dict[str, str]) -> None:
+    clean = {k: v.strip() for k, v in names.items() if v and v.strip()}
+    tmp = session_dir / (NAMES_FILE + ".tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(session_dir / NAMES_FILE)
+
+
+def display_name(key: str, names: dict[str, str]) -> str:
+    return names.get(key) or default_label(key)
 
 
 class TranscriptStore:
@@ -72,6 +108,7 @@ def export_markdown(jsonl: Path, out: Path) -> Path:
     Importing the .md into Notion keeps headings, quote and inline-code timestamps."""
     rows = sorted((r for r in load(jsonl) if r["type"] == "final" and r["text"]),
                   key=lambda r: r["t_start"])
+    names = load_names(jsonl.parent)  # renamed speakers ("상대 A" -> "김팀장") show up here too
     started = session_started(jsonl.parent)
     title = f"회의록 {started:%Y-%m-%d %H:%M}" if started else "회의록"
     props = []
@@ -79,7 +116,7 @@ def export_markdown(jsonl: Path, out: Path) -> Path:
         props.append(f"📅 {started:%Y년 %m월 %d일 %H:%M}")
     if rows:
         props.append(f"⏱ {_duration(rows[-1]['t_end'])}")
-        speakers = dict.fromkeys(CHANNEL_LABEL.get(r["channel"], r["channel"]) for r in rows)
+        speakers = dict.fromkeys(display_name(row_speaker_key(r), names) for r in rows)
         props.append("🗣 " + ", ".join(speakers))
     props.append(f"발언 {len(rows)}개")
     lines = [f"# {title}", "", "> " + " · ".join(props), "", "---", ""]
@@ -91,7 +128,7 @@ def export_markdown(jsonl: Path, out: Path) -> Path:
             section = int(r["t_start"] // SECTION_S)
             lines += [f"### {clock(section * SECTION_S)}", ""]
             speaker = None
-        who = CHANNEL_LABEL.get(r["channel"], r["channel"])
+        who = display_name(row_speaker_key(r), names)
         if who != speaker:
             lines += [f"**{who}**", ""]
             speaker = who

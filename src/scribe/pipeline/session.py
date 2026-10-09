@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from scribe.asr.filters import FinalFilter
+from scribe.audio.mixdown import mixdown
 from scribe.audio.recorder import FlacRecorder
 from scribe.config import SAMPLE_RATE
 from scribe.pipeline.events import Event, segment_id
@@ -59,7 +60,10 @@ class Session:
         hotwords: str = "",
         vad_params: VadParams | None = None,
         record: bool = True,
+        speakers=None,
     ) -> None:
+        """record: keep per-channel FLAC + a mixed "전체 녹음.flac" at the end.
+        speakers: a SpeakerTracker labelling remote participants A..J (None = no labels)."""
         self.sources = sources
         self.whisper_factory = whisper_factory
         self.whisper = whisper_factory()
@@ -70,6 +74,7 @@ class Session:
         self.hotwords = hotwords.strip()
         self.vad_params = vad_params
         self.record = record
+        self.speakers = speakers
         self.store = TranscriptStore(self.dir)
         self.events: queue.Queue[Event | None] = queue.Queue()
         self.jobs: queue.Queue[FinalJob | None] = queue.Queue()
@@ -131,6 +136,11 @@ class Session:
         finally:
             self.stop()
             md = self.store.close()
+        if self.record:
+            try:
+                mixdown(self.dir)
+            except Exception:  # the transcript is already safe; the per-channel FLACs remain
+                traceback.print_exc()
         return md
 
     @property
@@ -271,11 +281,18 @@ class Session:
             text = "" if reason else res.text
             if text:
                 self._last_final[job.channel] = text
+            speaker = None
+            if text and job.channel == "others" and self.speakers is not None:
+                try:  # only kept text feeds the voice clusters (noise must not create people)
+                    speaker = self.speakers.assign(job.audio)
+                except Exception:
+                    traceback.print_exc()
             self._emit(
                 type="final", segment_id=segment_id(job.channel, job.index), channel=job.channel,
                 t_start=job.start / SAMPLE_RATE, t_end=job.end / SAMPLE_RATE, text=text,
                 engine="whisper",
                 meta={"draft": job.draft, "rejected": reason, "infer_s": round(infer_s, 3),
+                      "speaker": speaker,
                       "queue_s": round(t0 - job.queued_mono, 3),
                       "avg_logprob": round(res.avg_logprob, 3),
                       "no_speech_prob": round(res.no_speech_prob, 3)},

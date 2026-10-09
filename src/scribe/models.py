@@ -11,6 +11,10 @@ from pathlib import Path
 from scribe.config import models_dir
 
 SHERPA_RELEASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
+# speaker embedding for telling remote participants apart (3D-Speaker CAM++, Apache-2.0, 27 MB)
+SPEAKER_MODEL = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+SPEAKER_MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                     f"speaker-recongition-models/{SPEAKER_MODEL}")  # sic: upstream tag spelling
 
 # Streaming (partial) models.
 # Official sherpa-onnx release tarballs:
@@ -103,6 +107,13 @@ def _find_transducer(root: Path) -> TransducerFiles:
         joiner=pick("joiner", int8=True),
         tokens=root / "tokens.txt",
     )
+
+
+def speaker_model_path() -> Path:
+    p = models_dir() / "speaker" / SPEAKER_MODEL
+    if not p.exists():
+        _download(SPEAKER_MODEL_URL, p)
+    return p
 
 
 def whisper_download_root() -> Path:

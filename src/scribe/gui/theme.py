@@ -24,11 +24,31 @@ HIGHLIGHT = "#fbf3db"  # search hit, warm yellow like a Notion highlight
 WARN_TEXT = "#793400"  # accent-orange-deep
 WARN_BG = "#fdf2e9"
 
-# decorative sticker tints for speaker chips: (background, text)
+# decorative sticker tints for speaker chips: (background, text). Decoration only, never
+# structure (DESIGN-notion.md); one tint per remote participant A..J, green for "me".
 SPEAKER_CHIP = {
-    "others": ("#e7f2fc", "#1f5f99"),  # sky
-    "me": ("#e6f5ea", "#18712d"),  # green
+    "me": ("#e6f5ea", "#18712d"),
+    "others": ("#e7f2fc", "#1f5f99"),  # draft / unknown remote speaker
 }
+OTHER_TINTS = [
+    ("#e7f2fc", "#1f5f99"),  # A sky
+    ("#f3ebfd", "#5b2b8a"),  # B purple
+    ("#fdf0e6", "#9a4300"),  # C orange
+    ("#e3f4f3", "#1d6f6c"),  # D teal
+    ("#fde9f5", "#a3216f"),  # E pink
+    ("#f3ece4", "#5c3b14"),  # F brown
+    ("#eef3e2", "#4b6114"),  # G olive
+    ("#e8eaf7", "#213183"),  # H indigo
+    ("#fbeaea", "#8a2a2a"),  # I rose
+    ("#eceff1", "#37474f"),  # J slate
+]
+
+
+def speaker_chip(key: str) -> tuple[str, str]:
+    channel, _, letter = key.partition(":")
+    if channel == "others" and letter:
+        return OTHER_TINTS[(ord(letter) - ord("A")) % len(OTHER_TINTS)]
+    return SPEAKER_CHIP.get(channel, (CANVAS_SOFT, INK_SECONDARY))
 
 FONT_FAMILIES = ["Inter", "Segoe UI", "Noto Sans KR", "Malgun Gothic"]
 
@@ -40,7 +60,6 @@ def font(px: int, weight: QFont.Weight = QFont.Weight.Normal, tracking: float = 
     f.setWeight(weight)
     if tracking:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, tracking)
-    f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     return f
 
 
