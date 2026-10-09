@@ -7,6 +7,8 @@ structural accent (blue) for the primary action / focus. Sticker colours are dec
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtGui import QFont
 
 PRIMARY = "#0075de"
@@ -23,6 +25,14 @@ ROW_ACTIVE = "#e8e7e4"
 HIGHLIGHT = "#fbf3db"  # search hit, warm yellow like a Notion highlight
 WARN_TEXT = "#793400"  # accent-orange-deep
 WARN_BG = "#fdf2e9"
+# recording controls: pause = orange, resume = green (Notion accents); stop = conventional red
+PAUSE = "#dd5b00"
+PAUSE_ACTIVE = "#b84a00"
+RESUME = "#1aae39"
+RESUME_ACTIVE = "#148a2d"
+STOP = "#e03e3e"
+STOP_ACTIVE = "#bf2f2f"
+CHECK_ICON = (Path(__file__).parent / "assets" / "check.svg").as_posix()
 
 # decorative sticker tints for speaker chips: (background, text). Decoration only, never
 # structure (DESIGN-notion.md); one tint per remote participant A..J, green for "me".
@@ -72,10 +82,14 @@ QMainWindow, #canvas {{ background: {CANVAS_SOFT}; }}
 #sidebarTitle {{ color: {INK_MUTED}; padding: 4px 8px; }}
 QListWidget#sessionList {{ background: transparent; border: none; outline: 0; }}
 QListWidget#sessionList::item {{
-    color: {INK_SECONDARY}; padding: 6px 10px; border-radius: 5px; margin: 1px 0;
+    color: {INK_SECONDARY}; padding: 0; border-radius: 5px; margin: 1px 0;  /* SessionRow pads */
 }}
 QListWidget#sessionList::item:hover {{ background: {ROW_HOVER}; }}
 QListWidget#sessionList::item:selected {{ background: {ROW_ACTIVE}; color: {INK}; }}
+#sessionRow QLabel {{ background: transparent; }}
+#sessionDate {{ color: {INK_FAINT}; }}
+QToolButton#trash {{ background: transparent; border: none; border-radius: 4px; padding: 2px; }}
+QToolButton#trash:hover {{ background: {ROW_ACTIVE}; }}
 
 /* top bar */
 #topbar {{ background: {CANVAS}; border-bottom: 1px solid {HAIRLINE}; }}
@@ -88,11 +102,18 @@ QPushButton#primary {{
 }}
 QPushButton#primary:pressed {{ background: {PRIMARY_ACTIVE}; }}
 QPushButton#primary:disabled {{ background: {INK_FAINT}; }}
-QPushButton#stop {{
-    background: {CANVAS}; color: {INK}; border: 1px solid {HAIRLINE}; border-radius: 16px;
-    padding: 6px 18px; font-weight: 500;
+QPushButton#stop, QPushButton#pause, QPushButton#resume {{
+    color: #ffffff; border: none; border-radius: 16px; padding: 6px 18px; font-weight: 500;
 }}
-QPushButton#stop:pressed {{ background: {ROW_ACTIVE}; }}
+QPushButton#stop {{ background: {STOP}; }}
+QPushButton#stop:pressed {{ background: {STOP_ACTIVE}; }}
+QPushButton#pause {{ background: {PAUSE}; }}
+QPushButton#pause:pressed {{ background: {PAUSE_ACTIVE}; }}
+QPushButton#resume {{ background: {RESUME}; }}
+QPushButton#resume:pressed {{ background: {RESUME_ACTIVE}; }}
+QPushButton#stop:disabled, QPushButton#pause:disabled, QPushButton#resume:disabled {{
+    background: {INK_FAINT};
+}}
 QPushButton#utility {{
     background: {CANVAS}; color: {INK}; border: 1px solid {HAIRLINE}; border-radius: 8px;
     padding: 4px 14px;
@@ -112,6 +133,16 @@ QComboBox QAbstractItemView {{
     selection-color: {INK};
 }}
 QCheckBox {{ color: {INK_SECONDARY}; spacing: 6px; }}
+QCheckBox::indicator {{
+    width: 14px; height: 14px; border: 1px solid #c4c1bc; border-radius: 4px; background: {CANVAS};
+}}
+QCheckBox::indicator:hover {{ border-color: {PRIMARY}; }}
+QCheckBox::indicator:checked {{
+    background: {PRIMARY}; border-color: {PRIMARY}; image: url("{CHECK_ICON}");
+}}
+QCheckBox::indicator:disabled {{ background: {CANVAS_SOFT}; border-color: {HAIRLINE}; }}
+QCheckBox::indicator:checked:disabled {{ background: {INK_FAINT}; border-color: {INK_FAINT}; }}
+QCheckBox:disabled {{ color: {INK_FAINT}; }}
 
 /* document page */
 #page {{ background: {CANVAS}; }}

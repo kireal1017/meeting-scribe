@@ -1,10 +1,10 @@
 """meeting-scribe desktop window (PySide6), styled after docs/DESIGN-notion.md.
 
-  ┌ sidebar ───────┬ top bar: 상대 [장치▾]  나 [장치▾]   [검색]   (● 기록 시작) ┐
+  ┌ sidebar ───────┬ top bar: 스피커 [장치▾]  나 [장치▾]   [검색]  (● 기록 시작) ┐
   │ 회의록          │ [callout: GPU problems]                                  │
   │ ● 기록 중       │                                                          │
   │ 10월 10일 00:19 │        page: title / properties / utterance blocks       │
-  │ 10월 9일 23:46  │                                                          │
+  │ 10월 9일 23:46  │   (click the title or a speaker chip to rename it)       │
   │ [폴더 열기]     ├ footer: status · GPU ──────────────────────────────────── ┤
 """
 
@@ -17,7 +17,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -45,21 +46,27 @@ from scribe.gui import theme
 from scribe.gui.document import TranscriptView
 from scribe.gui.engine import DoctorRunner, Engines, GpuMonitor, SessionRunner
 from scribe.gui.icon import app_icon, set_windows_app_id
-from scribe.gui.mini import MiniWindow
+from scribe.gui.mini import MiniWindow, nav_icon
+from scribe.gui.trash import move_to_trash
 from scribe.store.transcript import (
     clock,
     default_label,
+    default_title,
     display_name,
     export_markdown,
     load,
     load_names,
+    load_title,
     save_names,
+    save_title,
     session_started,
+    session_title,
 )
 
 log = logging.getLogger("scribe.gui")
 WEEKDAY = "월화수목금토일"
 LIVE = "__live__"
+IDLE_HINT = "‘기록 시작’을 누르면 연결된 스피커에서 들리는 소리를 받아적습니다."
 # final-pass choices shown in the sidebar: (label, faster-whisper model, tooltip)
 FINAL_CHOICES = [
     ("빠름 · large-v3-turbo", "large-v3-turbo",
@@ -87,6 +94,51 @@ def _restyle(w: QWidget, name: str) -> None:
     w.setObjectName(name)
     w.style().unpolish(w)
     w.style().polish(w)
+
+
+class SessionRow(QWidget):
+    """Sidebar row: meeting title (+ date when renamed) and a trash button shown on hover."""
+
+    deleteClicked = Signal()
+
+    def __init__(self, title: str, date: str | None = None, deletable: bool = True) -> None:
+        super().__init__(objectName="sessionRow")
+        h = QHBoxLayout(self)
+        h.setContentsMargins(10, 6, 4, 6)
+        h.setSpacing(4)
+        v = QVBoxLayout()
+        v.setSpacing(0)
+        self.title = QLabel(title)
+        self.title.setFont(theme.font(14))
+        v.addWidget(self.title)
+        if date:
+            sub = QLabel(date, objectName="sessionDate")
+            sub.setFont(theme.font(12))
+            v.addWidget(sub)
+        h.addLayout(v, 1)
+        self.trash = QToolButton(objectName="trash")
+        self.trash.setIcon(nav_icon("trash", theme.INK_MUTED))
+        self.trash.setIconSize(QSize(16, 16))
+        self.trash.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.trash.setToolTip("휴지통으로 이동")
+        self.trash.clicked.connect(self.deleteClicked)
+        policy = self.trash.sizePolicy()  # row height stays the same while hidden
+        policy.setRetainSizeWhenHidden(True)
+        self.trash.setSizePolicy(policy)
+        self.trash.hide()
+        self._deletable = deletable
+        h.addWidget(self.trash)
+        for label in self.findChildren(QLabel):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # select the row
+            label.setMinimumWidth(1)  # long titles are clipped, never widen the sidebar
+
+    def enterEvent(self, e) -> None:
+        self.trash.setVisible(self._deletable)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        self.trash.hide()
+        super().leaveEvent(e)
 
 
 class GpuDialog(QDialog):
@@ -166,6 +218,7 @@ class MainWindow(QMainWindow):
         self.mini.startPauseClicked.connect(self._start_or_pause)
         self.mini.view.speakerClicked.connect(
             lambda key: self._rename_speaker(key, self.mini.view))
+        self.mini.view.titleClicked.connect(lambda: self._rename_title(self.mini.view))
         self.mini.stopClicked.connect(self._stop)
         self.mini.backClicked.connect(self._leave_mini)
 
@@ -217,6 +270,8 @@ class MainWindow(QMainWindow):
         self.archive = TranscriptView()
         self.live.speakerClicked.connect(lambda key: self._rename_speaker(key, self.live))
         self.archive.speakerClicked.connect(lambda key: self._rename_speaker(key, self.archive))
+        self.live.titleClicked.connect(lambda: self._rename_title(self.live))
+        self.archive.titleClicked.connect(lambda: self._rename_title(self.archive))
         self.stack = QStackedWidget()
         self.stack.addWidget(self.live)
         self.stack.addWidget(self.archive)
@@ -248,6 +303,7 @@ class MainWindow(QMainWindow):
         title.setFont(theme.font(12, QFont.Weight.DemiBold, 0.125))
         self.sessions = QListWidget(objectName="sessionList")
         self.sessions.setFont(theme.font(14))
+        self.sessions.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sessions.itemClicked.connect(self._open_item)
         folder = _button("폴더 열기", "utility")
         folder.clicked.connect(lambda: os.startfile(self.out_root))  # noqa: S606
@@ -305,13 +361,13 @@ class MainWindow(QMainWindow):
         self.start_btn = _button("준비 중…", "primary")
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._toggle)
-        self.pause_btn = _button("일시중지", "utility")
+        self.pause_btn = _button("일시중지", "pause")
         self.pause_btn.clicked.connect(self._pause_resume)
         self.pause_btn.hide()
         self.mini_btn = _button("미니 모드", "utility")
         self.mini_btn.setToolTip("작은 세로 창으로 전환 (항상 위에 표시)")
         self.mini_btn.clicked.connect(self._enter_mini)
-        for w in (QLabel("상대"), self.loop_combo, self.mic_check, self.mic_combo):
+        for w in (QLabel("스피커"), self.loop_combo, self.mic_check, self.mic_combo):
             w.setFont(theme.font(14))
             h.addWidget(w)
         h.addStretch(1)
@@ -358,22 +414,51 @@ class MainWindow(QMainWindow):
     def _refresh_sessions(self, select: Path | None = None) -> None:
         self.sessions.clear()
         if self.runner.running and self.live_dir:
-            item = QListWidgetItem("●  기록 중")
-            item.setData(Qt.ItemDataRole.UserRole, LIVE)
-            item.setForeground(Qt.GlobalColor.black)
-            self.sessions.addItem(item)
+            self._add_session_row(LIVE, SessionRow("●  기록 중", load_title(self.live_dir),
+                                                   deletable=False))
         dirs = sorted((p for p in self.out_root.glob("*") if (p / "transcript.jsonl").exists()
                        and p != self.live_dir), reverse=True) if self.out_root.exists() else []
         for d in dirs:
             started = session_started(d)
-            item = QListWidgetItem(_session_label(started) if started else d.name)
-            item.setData(Qt.ItemDataRole.UserRole, str(d))
-            item.setToolTip(str(d))
-            self.sessions.addItem(item)
+            date = _session_label(started) if started else d.name
+            title = load_title(d)
+            row = SessionRow(title, date) if title else SessionRow(date)
+            row.deleteClicked.connect(lambda d=d: self._delete_session(d))
+            row.setToolTip(str(d))  # the row widget covers the item, so it owns the tooltip
+            item = self._add_session_row(str(d), row)
             if select and d == select:
                 self.sessions.setCurrentItem(item)
         if self.runner.running:
             self.sessions.setCurrentRow(0)
+
+    def _add_session_row(self, key: str, row: SessionRow) -> QListWidgetItem:
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setSizeHint(row.sizeHint())
+        self.sessions.addItem(item)
+        self.sessions.setItemWidget(item, row)
+        return item
+
+    def _delete_session(self, d: Path) -> None:
+        """Trash button: move the meeting folder to the Recycle Bin (restorable from there)."""
+        try:
+            move_to_trash(d)
+        except OSError as e:
+            log.error("trash failed: %s", e)
+            self._show_callout(f"{e}\n폴더나 파일이 다른 프로그램에서 열려 있는지 확인해 주세요.")
+            return
+        log.info("moved to recycle bin: %s", d)
+        if d == self.archive_dir:
+            self.archive_dir = None
+            self.archive.reset("회의록", names={})
+            self.stack.setCurrentWidget(self.live)
+        if d == self.shown_live_dir:  # the meeting that just ended is still on the live page
+            self.shown_live_dir = None
+            for view in self._views():
+                view.reset("새 회의록", names={})
+                view.set_placeholder(IDLE_HINT)
+        self._refresh_sessions()
+        self.status.setText(f"휴지통으로 이동했습니다 · {d.name}")
 
     def _open_item(self, item: QListWidgetItem) -> None:
         key = item.data(Qt.ItemDataRole.UserRole)
@@ -381,10 +466,8 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.live)
         else:
             d = Path(key)
-            started = session_started(d)
             self.archive_dir = d
-            self.archive.reset(f"회의록 {started:%Y-%m-%d %H:%M}" if started else d.name, started,
-                               names=load_names(d))
+            self.archive.reset(session_title(d), session_started(d), names=load_names(d))
             self.archive.load_rows(load(d / "transcript.jsonl"))
             self.stack.setCurrentWidget(self.archive)
         self.jump.hide()
@@ -398,7 +481,7 @@ class MainWindow(QMainWindow):
         log.info("engines ready")
         self._engine_state = "ready"
         for view in self._views():
-            view.set_placeholder("‘기록 시작’을 누르면 연결된 스피커에서 들리는 소리를 받아적습니다.")
+            view.set_placeholder(IDLE_HINT)
         self.status.setText(f"준비 완료 · 확정 모델 {self.engines.final_model}")
         self._sync_controls()
 
@@ -483,6 +566,9 @@ class MainWindow(QMainWindow):
         self.model_combo.setEnabled(state in ("idle", "unavailable"))
         self.record_check.setEnabled(state not in ("recording", "paused", "saving"))
         self.pause_btn.setText("재개" if state == "paused" else "일시중지")
+        pause_style = "resume" if state == "paused" else "pause"
+        if self.pause_btn.objectName() != pause_style:
+            _restyle(self.pause_btn, pause_style)
         elapsed = clock((datetime.now() - self.started).total_seconds()) if self.started else ""
         self.mini.set_state(state, elapsed)
 
@@ -506,19 +592,32 @@ class MainWindow(QMainWindow):
         settings.save(self.settings)
         log.info("record_audio -> %s", on)
 
+    def _session_of(self, view: TranscriptView) -> Path | None:
+        return self.archive_dir if view is self.archive else self.shown_live_dir
+
+    def _ask(self, title: str, label: str, text: str) -> str | None:
+        parent = self.mini if self.mini.isVisible() else self
+        value, ok = QInputDialog.getText(parent, title, label, text=text)
+        return value if ok else None
+
+    def _reexport(self, session_dir: Path) -> None:
+        """Refresh transcript.md after a rename; a running meeting exports at the end anyway."""
+        jsonl = session_dir / "transcript.jsonl"
+        if not self._is_recording(session_dir) and jsonl.exists():
+            export_markdown(jsonl, session_dir / "transcript.md")
+
+    def _is_recording(self, session_dir: Path) -> bool:
+        return self.runner.running and session_dir == self.live_dir
+
     def _rename_speaker(self, key: str, view: TranscriptView) -> None:
         """Chip clicked: name this speaker for this meeting ("상대 A" -> "김팀장")."""
-        session_dir = self.archive_dir if view is self.archive else self.shown_live_dir
+        session_dir = self._session_of(view)
         if session_dir is None:
             return
         names = load_names(session_dir)
-        current, default = display_name(key, names), default_label(key)
-        parent = self.mini if self.mini.isVisible() else self
-        text, ok = QInputDialog.getText(
-            parent, "이름 바꾸기",
-            f"‘{current}’의 이름을 입력하세요.\n비우면 기본값 ‘{default}’로 돌아갑니다.",
-            text=names.get(key, ""))
-        if not ok:
+        text = self._ask("이름 바꾸기", f"‘{display_name(key, names)}’의 이름을 입력하세요.\n"
+                         f"비우면 기본값 ‘{default_label(key)}’로 돌아갑니다.", names.get(key, ""))
+        if text is None:
             return
         names[key] = text.strip()
         save_names(session_dir, names)
@@ -529,10 +628,28 @@ class MainWindow(QMainWindow):
                 v.set_names(names)
         if session_dir == self.archive_dir:
             self.archive.set_names(names)
-        live_running = self.runner.running and session_dir == self.live_dir
-        jsonl = session_dir / "transcript.jsonl"
-        if not live_running and jsonl.exists():  # a running meeting exports with names at the end
-            export_markdown(jsonl, session_dir / "transcript.md")
+        self._reexport(session_dir)
+
+    def _rename_title(self, view: TranscriptView) -> None:
+        """Title clicked: rename this meeting (page, sidebar and transcript.md)."""
+        session_dir = self._session_of(view)
+        if session_dir is None:
+            return
+        default = default_title(session_started(session_dir))
+        text = self._ask("제목 바꾸기", f"회의록 제목을 입력하세요.\n비우면 기본값 ‘{default}’로 돌아갑니다.",
+                         load_title(session_dir) or "")
+        if text is None:
+            return
+        save_title(session_dir, text)
+        title = session_title(session_dir)
+        log.info("title -> %s (%s)", title, session_dir.name)
+        if session_dir == self.shown_live_dir:
+            for v in self._views():
+                v.set_title(title)
+        if session_dir == self.archive_dir:
+            self.archive.set_title(title)
+        self._reexport(session_dir)
+        self._refresh_sessions(select=None if self._is_recording(session_dir) else session_dir)
 
     def _enter_mini(self) -> None:
         self._sync_controls()

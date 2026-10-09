@@ -278,3 +278,80 @@ def test_rename_flow_on_saved_meeting(app, tmp_path, monkeypatch):
     assert load_names(d) == {} and "상대 A" in w.archive.toPlainText()
     w.mini.allow_close = True
     w.mini.close()
+
+
+def _window_with_meeting(tmp_path, monkeypatch):
+    import json
+
+    import scribe.gui.app as gui_app
+
+    monkeypatch.setenv("MEETING_SCRIBE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(gui_app.Engines, "load", lambda self: None)
+    monkeypatch.setattr(gui_app.GpuMonitor, "start", lambda self: None)
+    out = tmp_path / "회의록"
+    d = out / "20261010-103000"
+    d.mkdir(parents=True)
+    row = {"type": "final", "channel": "others", "t_start": 1.0, "t_end": 3.0, "text": "시작합니다",
+           "meta": {"speaker": "A"}}
+    (d / "transcript.jsonl").write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+    return gui_app, gui_app.MainWindow(out), d
+
+
+def _close(w):
+    w.mini.allow_close = True
+    w.mini.close()
+
+
+def test_title_click_renames_meeting_everywhere(app, tmp_path, monkeypatch):
+    from scribe.store.transcript import load_title
+
+    gui_app, w, d = _window_with_meeting(tmp_path, monkeypatch)
+    w._open_item(w.sessions.item(0))
+    monkeypatch.setattr(gui_app.QInputDialog, "getText", lambda *a, **k: ("주간 개발 회의", True))
+    # the title is a clickable anchor that opens the rename dialog
+    w.archive.anchorClicked.emit(__import__("PySide6.QtCore", fromlist=["QUrl"]).QUrl("title:"))
+    assert load_title(d) == "주간 개발 회의"
+    assert blocks(w.archive)[0] == "주간 개발 회의"
+    assert (d / "transcript.md").read_text(encoding="utf-8").startswith("# 주간 개발 회의")
+    row = w.sessions.itemWidget(w.sessions.item(0))
+    assert row.title.text() == "주간 개발 회의"  # sidebar shows the title (date underneath)
+    monkeypatch.setattr(gui_app.QInputDialog, "getText", lambda *a, **k: ("  ", True))
+    w._rename_title(w.archive)  # blank -> back to the default
+    assert load_title(d) is None and blocks(w.archive)[0] == "회의록 2026-10-10 10:30"
+    _close(w)
+
+
+def test_trash_button_moves_meeting_out_of_list(app, tmp_path, monkeypatch):
+    import shutil
+
+    gui_app, w, d = _window_with_meeting(tmp_path, monkeypatch)
+    trashed = []
+    monkeypatch.setattr(gui_app, "move_to_trash", lambda p: (trashed.append(p), shutil.rmtree(p)))
+    w._open_item(w.sessions.item(0))
+    w.sessions.itemWidget(w.sessions.item(0)).deleteClicked.emit()
+    assert trashed == [d] and w.sessions.count() == 0
+    assert w.archive_dir is None and w.stack.currentWidget() is w.live
+
+    def fail(p):
+        raise OSError("in use")
+
+    d.mkdir()
+    (d / "transcript.jsonl").write_text("", encoding="utf-8")
+    w._refresh_sessions()
+    monkeypatch.setattr(gui_app, "move_to_trash", fail)
+    w.sessions.itemWidget(w.sessions.item(0)).deleteClicked.emit()
+    assert w.sessions.count() == 1 and not w.callout.isHidden()
+    _close(w)
+
+
+def test_pause_button_colour_follows_state(app, tmp_path, monkeypatch):
+    gui_app, w, _ = _window_with_meeting(tmp_path, monkeypatch)
+    w._engine_state = "ready"
+    monkeypatch.setattr(type(w.runner), "running", property(lambda self: True))
+    monkeypatch.setattr(type(w.runner), "paused", property(lambda self: False), raising=False)
+    w._sync_controls()
+    assert (w.pause_btn.objectName(), w.start_btn.objectName()) == ("pause", "stop")
+    monkeypatch.setattr(type(w.runner), "paused", property(lambda self: True), raising=False)
+    w._sync_controls()
+    assert w.pause_btn.objectName() == "resume" and w.pause_btn.text() == "재개"
+    _close(w)

@@ -53,7 +53,7 @@ def nav_icon(kind: str, color: str, size: int = 44) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.57, s * 0.24, s * 0.15, s * 0.52), 2, 2)
     elif kind == "stop":
         p.drawRoundedRect(QRectF(s * 0.28, s * 0.28, s * 0.44, s * 0.44), 4, 4)
-    elif kind == "back":
+    elif kind in ("back", "trash"):
         pen = p.pen()
         pen.setStyle(Qt.PenStyle.SolidLine)
         pen.setColor(QColor(color))
@@ -62,6 +62,15 @@ def nav_icon(kind: str, color: str, size: int = 44) -> QIcon:
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "trash":
+        p.drawLine(QPointF(s * 0.2, s * 0.28), QPointF(s * 0.8, s * 0.28))  # lid
+        p.drawLine(QPointF(s * 0.4, s * 0.17), QPointF(s * 0.6, s * 0.17))  # handle
+        body = QPainterPath(QPointF(s * 0.28, s * 0.28))
+        body.lineTo(s * 0.32, s * 0.82)
+        body.lineTo(s * 0.68, s * 0.82)
+        body.lineTo(s * 0.72, s * 0.28)
+        p.drawPath(body)
+    elif kind == "back":
         p.drawLine(QPointF(s * 0.74, s * 0.5), QPointF(s * 0.28, s * 0.5))
         path = QPainterPath(QPointF(s * 0.46, s * 0.3))
         path.lineTo(s * 0.26, s * 0.5)
@@ -81,10 +90,16 @@ class NavButton(QToolButton):
         self.setFont(theme.font(12, QFont.Weight.Medium))
         self.setText(text)
         self.setMinimumHeight(58)
+        self._look: tuple | None = None
 
     def set(self, text: str, kind: str, color: str, enabled: bool = True) -> None:
+        color = color if enabled else theme.INK_FAINT
+        if self._look == (text, kind, color, enabled):
+            return  # called every second by the clock tick: skip re-rendering and re-styling
+        self._look = (text, kind, color, enabled)
         self.setText(text)
-        self.setIcon(nav_icon(kind, color if enabled else theme.INK_FAINT))
+        self.setIcon(nav_icon(kind, color))
+        self.setStyleSheet(f"color: {color};")  # label in the icon's colour
         self.setEnabled(enabled)
 
 
@@ -165,14 +180,14 @@ class MiniWindow(QWidget):
 
     def set_state(self, state: str, elapsed: str = "") -> None:
         """state: loading | idle | recording | paused | saving | unavailable"""
-        blue, ink = theme.PRIMARY, theme.INK_SECONDARY
+        blue, ink, red = theme.PRIMARY, theme.INK_SECONDARY, theme.STOP
         if state == "recording":
-            self.start_pause.set("일시중지", "pause", ink)
-            self.stop.set("기록 중지", "stop", ink)
+            self.start_pause.set("일시중지", "pause", theme.PAUSE)
+            self.stop.set("기록 중지", "stop", red)
             pill = f"●  기록 중 {elapsed}"
         elif state == "paused":
-            self.start_pause.set("재개", "play", blue)
-            self.stop.set("기록 중지", "stop", ink)
+            self.start_pause.set("재개", "play", theme.RESUME)
+            self.stop.set("기록 중지", "stop", red)
             pill = f"❚❚  일시중지 {elapsed}"
         elif state == "idle":
             self.start_pause.set("기록 시작", "play", blue)
@@ -188,9 +203,11 @@ class MiniWindow(QWidget):
             self.stop.set("기록 중지", "stop", ink, enabled=False)
             pill = "엔진 준비 중…" if state == "loading" else "GPU 사용 불가"
         self.state.setText(pill)
-        self.state.setProperty("live", state in ("recording", "paused"))
-        self.state.style().unpolish(self.state)
-        self.state.style().polish(self.state)
+        live = state in ("recording", "paused")
+        if self.state.property("live") != live:
+            self.state.setProperty("live", live)
+            self.state.style().unpolish(self.state)
+            self.state.style().polish(self.state)
 
     def place_bottom_right(self) -> None:
         screen = (self.screen() or self.windowHandle().screen()).availableGeometry()
