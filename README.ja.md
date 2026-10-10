@@ -124,7 +124,7 @@ NVIDIA GPU がない、または使いにくい場合は、確定字幕だけを
   失敗した区間の音声は、**全体の音声録音を保存**をオンにした場合にのみ残ります。
 - **限界**: 無音判定の情報がないモデルは雑音を文にしてしまうことがあるため、仮字幕が何も聞き取らなかった区間の
   短い結果（2 文字以下、「감사합니다（ありがとうございます）」など）は捨てます。そのため、仮字幕が聞き逃した短い返事（「네（はい）」）が
-  抜けることがあります。リクエストごとに 0.5〜2 秒かかり、会議を終えるときは残りの文を送り切るまで少し待つことがあります。
+  抜けることがあります。リクエストごとに 0.5〜2.5 秒かかり（測定値は [docs/BENCHMARKS.md](docs/BENCHMARKS.md)）、会議を終えるときは残りの文を送り切るまで少し待つことがあります。
 - 外部サービスへ音声を送るために必要な同意を含め、録音に関するすべての同意は利用者の責任です（[録音の同意](#録音の同意)）。
 
 ## 保存されるファイル
@@ -230,6 +230,7 @@ uv run scribe run --final-backend openai    # 確定字幕エンジン: local / 
 uv run scribe run --final-backend openrouter --api-model openai/whisper-large-v3
 uv run scribe run --file a.wav --realtime   # ファイルを実時間の速度で再生しながら書き起こし
 uv run scribe bench whisper|sherpa|e2e      # 性能測定（docs/BENCHMARKS.md）
+uv run scribe bench e2e --final-backend openai  # 外部 API の確定字幕を測定（テスト音声 約 76 秒を送信）
 ```
 
 ターミナルでは、話している間に認識された断片が灰色でつながり、文が終わると確定字幕が表示されます。

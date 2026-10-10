@@ -151,8 +151,14 @@ def cmd_bench(args) -> int:
     elif args.target == "sherpa":
         res = bench.bench_sherpa(fixtures, num_threads=args.threads, model=args.partial_model)
     else:
+        spec = None
+        if args.final_backend != "local":
+            from scribe import config
+            from scribe.asr.backends import FinalSpec
+            spec = FinalSpec(args.final_backend, args.api_model
+                             or config.API_PROVIDERS[args.final_backend]["models"][0])
         res = bench.bench_e2e(fixtures, realtime=not args.fast, model=args.partial_model,
-                              final_model=args.final_model)
+                              final_model=args.final_model, spec=spec)
     print(json.dumps(res, ensure_ascii=False, indent=2))
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
@@ -206,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--threads", type=int, default=2)
     b.add_argument("--partial-model", choices=PARTIAL_MODELS, default=DEFAULT_PARTIAL_MODEL)
     b.add_argument("--fast", action="store_true", help="e2e: 실시간 대기 없이 최대 속도")
+    b.add_argument("--final-backend", choices=FINAL_BACKENDS, default="local",
+                   help="e2e: 확정 자막 엔진 (외부 API는 테스트 음성 전체를 전송)")
+    b.add_argument("--api-model", help="e2e: 외부 API 모델 ID (기본: 제공자 기본 모델)")
     b.add_argument("--json-out")
     b.set_defaults(func=cmd_bench)
 
