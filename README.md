@@ -122,7 +122,7 @@ NVIDIA GPU가 없거나 쓰기 어려우면 확정 자막만 외부 API로 만�
   실패한 구간의 음성은 **전체 음성 녹음 저장**을 켠 경우에만 남습니다.
 - **한계**: 무음 판별 정보가 없는 모델은 잡음이 문장으로 남을 수 있어, 임시 자막이 아무것도 못 들은 구간의
   짧은 결과(2글자 이하, "감사합니다" 등)는 버립니다. 이 때문에 임시 자막이 놓친 짧은 대답("네")이 빠질 수
-  있습니다. 요청마다 0.5~2초가 걸리고, 회의를 끝낼 때 남은 문장을 마저 보내느라 조금 기다릴 수 있습니다.
+  있습니다. 요청마다 0.5~2.5초가 걸리고(측정값은 [docs/BENCHMARKS.md](docs/BENCHMARKS.md#외부-api-확정-자막-openai--openrouter-2026-10-10)), 회의를 끝낼 때 남은 문장을 마저 보내느라 조금 기다릴 수 있습니다.
 - 외부 서비스로 음성을 보내는 데 필요한 동의를 포함해, 모든 녹취 동의는 사용자의 책임에 있습니다([녹취 동의](#녹취-동의)).
 
 ## 저장되는 파일
@@ -228,6 +228,7 @@ uv run scribe run --final-backend openai    # 확정 자막 엔진: local / open
 uv run scribe run --final-backend openrouter --api-model openai/whisper-large-v3
 uv run scribe run --file a.wav --realtime   # 파일을 실시간 속도로 재생하며 전사
 uv run scribe bench whisper|sherpa|e2e      # 성능 측정 (docs/BENCHMARKS.md)
+uv run scribe bench e2e --final-backend openai  # 외부 API 확정 자막 측정 (테스트 음성 약 76초 전송)
 ```
 
 터미널에는 말하는 동안 인식된 조각이 회색으로 이어 붙고, 문장이 끝나면 확정 자막이 찍힙니다.

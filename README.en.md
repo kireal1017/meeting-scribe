@@ -126,7 +126,7 @@ speaker separation and recording still run on your computer, and **only finished
   Audio of failed segments is kept only if **Save full audio recording** is on.
 - **Limits**: models without no-speech metrics can turn noise into sentences, so short results (2 characters or fewer, or phrases such as
   "감사합니다" / "thank you") from segments where the draft caption heard nothing are dropped. Because of this, a short reply the draft missed
-  (such as "네" / "yes") can be lost. Each request takes 0.5–2 s, and ending a meeting may take a moment while the remaining sentences are sent.
+  (such as "네" / "yes") can be lost. Each request takes 0.5–2.5 s (measurements in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)), and ending a meeting may take a moment while the remaining sentences are sent.
 - All consent for recording is the user's responsibility, including consent needed to send audio to an external service ([Recording consent](#recording-consent)).
 
 ## Saved files
@@ -232,6 +232,7 @@ uv run scribe run --final-backend openai    # final caption engine: local / open
 uv run scribe run --final-backend openrouter --api-model openai/whisper-large-v3
 uv run scribe run --file a.wav --realtime   # play a file at real-time speed and transcribe it
 uv run scribe bench whisper|sherpa|e2e      # benchmarks (docs/BENCHMARKS.md)
+uv run scribe bench e2e --final-backend openai  # benchmark an external API final pass (uploads ~76 s of test audio)
 ```
 
 In the terminal, recognized fragments are appended in grey while someone speaks, and the final caption is printed when the sentence ends.

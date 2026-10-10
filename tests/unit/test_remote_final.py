@@ -282,9 +282,12 @@ def test_retry_auth_and_request_errors(server, provider):
     server.replies += [(429, {"error": "slow down"}, {}), (200, {"text": "됐습니다"}, {})]
     assert remote(server, provider).transcribe(AUDIO).text == "됐습니다"
     assert len(server.requests) == 2
-    server.replies.append((401, {"error": {"message": "bad key"}}, {}))
-    with pytest.raises(ApiAuthError, match="API 키"):
+    echoed = "Incorrect API key provided: sk-proj-****************ab12. See your keys."
+    server.replies.append((401, {"error": {"message": echoed}}, {}))
+    with pytest.raises(ApiAuthError, match="API 키") as err:
         remote(server, provider).transcribe(AUDIO)
+    assert "sk-" not in str(err.value) and "ab12" not in str(err.value)
+    assert "[키 가림]" in str(err.value)
     server.replies.append((400, {"error": {"message": "audio too short"}}, {}))
     with pytest.raises(ApiRequestError, match="audio too short"):
         remote(server, provider).transcribe(AUDIO)

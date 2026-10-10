@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -60,14 +61,19 @@ def _multipart(fields: dict[str, str], file: tuple[str, bytes, str]) -> tuple[by
     return out.getvalue(), f"multipart/form-data; boundary={boundary}"
 
 
+# providers echo part of a rejected key ("sk-proj-****abcd"); it must not reach the UI or logs
+_KEY_LIKE = re.compile(r"\b(?:sk|or)-[\w*.-]{4,}")
+
+
 def _error_text(body: bytes) -> str:
     try:
         data = json.loads(body)
         err = data.get("error", data)
         msg = err.get("message") if isinstance(err, dict) else err
-        return str(msg)[:300]
+        text = str(msg)
     except (ValueError, AttributeError):
-        return body[:300].decode("utf-8", "replace")
+        text = body.decode("utf-8", "replace")
+    return _KEY_LIKE.sub("[키 가림]", text)[:300]
 
 
 class RemoteFinal:

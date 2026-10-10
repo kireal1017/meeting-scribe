@@ -141,8 +141,12 @@ def bench_sherpa(fixtures: list[Fixture], num_threads: int = 2,
 
 def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
               model: str = DEFAULT_PARTIAL_MODEL,
-              final_model: str = config.WHISPER_MODEL) -> dict:
-    """Run the full pipeline on fixture files paced at real time; measure latency + CER."""
+              final_model: str = config.WHISPER_MODEL, spec=None) -> dict:
+    """Run the full pipeline on fixture files paced at real time; measure latency + CER.
+
+    spec: a FinalSpec for an external API final pass (uploads every fixture sentence);
+    None runs the local GPU Whisper."""
+    from scribe.asr.backends import create_final
     from scribe.asr.sherpa_stream import SherpaStreaming
     from scribe.asr.whisper_final import WhisperFinal
     from scribe.audio.capture import FileSource
@@ -150,9 +154,13 @@ def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
     from scribe.pipeline.session import Session
 
     sherpa = SherpaStreaming(model)
-    whisper = WhisperFinal(model=final_model)
-    whisper.transcribe(np.zeros(SAMPLE_RATE, np.float32))  # warm-up
+    if spec is None or not spec.remote:
+        whisper = WhisperFinal(model=final_model)
+        whisper.transcribe(np.zeros(SAMPLE_RATE, np.float32))  # warm-up
+    else:
+        whisper = create_final(spec)
     partial_lat, final_lat, refs, hyps = [], [], [], []
+    upload_s, cost, failed = 0.0, 0.0, 0
     per_clip = []
     for fx in fixtures:
         src = FileSource(fx.wav, realtime=realtime)
@@ -162,6 +170,11 @@ def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
                            Path(td), record=False)
             sess.run(events.append)
         finals = [e for e in events if e.type == "final" and e.text]
+        for e in events:
+            if e.type == "final":
+                upload_s += e.meta.get("upload_s", 0.0)
+                cost += e.meta.get("cost", 0.0)
+                failed += e.meta.get("rejected") == "api-error"
         partials = [e for e in events if e.type == "partial"]
         t0 = src.started_at
         for s in fx.sentences:
@@ -179,6 +192,7 @@ def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
         refs.append(fx.text)
         hyps.append(hyp)
     return {
+        "final": getattr(whisper, "label", final_model),
         "partial_model": sherpa.model_name,
         "realtime": realtime,
         "partial_latency_p50_s": round(statistics.median(partial_lat), 3),
@@ -190,4 +204,6 @@ def bench_e2e(fixtures: list[Fixture], realtime: bool = True,
         "sentences_with_partial": len(partial_lat),
         "sentences_with_final": len(final_lat),
         "sentences_total": sum(len(fx.sentences) for fx in fixtures),
+        **({"upload_s": round(upload_s, 1), "cost_usd": round(cost, 6), "api_failed": failed}
+           if getattr(whisper, "remote", False) else {}),
     }
