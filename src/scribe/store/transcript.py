@@ -25,6 +25,11 @@ def speaker_key(channel: str, speaker: str | None = None) -> str:
     return f"{channel}:{speaker}" if speaker else channel
 
 
+def is_failed(row: dict) -> bool:
+    """A final the external API could not confirm (kept as a marked gap with its draft)."""
+    return not row.get("text") and (row.get("meta") or {}).get("rejected") == "api-error"
+
+
 def row_speaker_key(row: dict) -> str:
     return speaker_key(row["channel"], (row.get("meta") or {}).get("speaker"))
 
@@ -137,19 +142,20 @@ def _duration(seconds: float) -> str:
 def export_markdown(jsonl: Path, out: Path) -> Path:
     """Notion-friendly page: title, a property line, then speaker-grouped paragraphs.
     Importing the .md into Notion keeps headings, quote and inline-code timestamps."""
-    rows = sorted((r for r in load(jsonl) if r["type"] == "final" and r["text"]),
+    rows = sorted((r for r in load(jsonl) if r["type"] == "final" and (r["text"] or is_failed(r))),
                   key=lambda r: r["t_start"])
+    confirmed = [r for r in rows if r["text"]]  # failed gaps never count as utterances
     names = load_names(jsonl.parent)  # renamed speakers ("상대 A" -> "김팀장") show up here too
     started = session_started(jsonl.parent)
     title = session_title(jsonl.parent)
     props = []
     if started:
         props.append(f"📅 {started:%Y년 %m월 %d일 %H:%M}")
-    if rows:
-        props.append(f"⏱ {_duration(rows[-1]['t_end'])}")
-        speakers = dict.fromkeys(display_name(row_speaker_key(r), names) for r in rows)
+    if confirmed:
+        props.append(f"⏱ {_duration(confirmed[-1]['t_end'])}")
+        speakers = dict.fromkeys(display_name(row_speaker_key(r), names) for r in confirmed)
         props.append("🗣 " + ", ".join(speakers))
-    props.append(f"발언 {len(rows)}개")
+    props.append(f"발언 {len(confirmed)}개")
     lines = [f"# {title}", "", "> " + " · ".join(props), "", "---", ""]
 
     sections = bool(rows) and rows[-1]["t_end"] >= SECTION_S
@@ -159,6 +165,11 @@ def export_markdown(jsonl: Path, out: Path) -> Path:
             section = int(r["t_start"] // SECTION_S)
             lines += [f"### {clock(section * SECTION_S)}", ""]
             speaker = None
+        if not r["text"]:  # the external API could not confirm it: a marked gap, no speaker
+            draft = (r.get("meta") or {}).get("draft") or ""
+            lines += [f"`{clock(r['t_start'])}` ⚠ 확정 실패"
+                      + (f" (임시 자막: {draft})" if draft else ""), ""]
+            continue
         who = display_name(row_speaker_key(r), names)
         if who != speaker:
             lines += [f"**{who}**", ""]

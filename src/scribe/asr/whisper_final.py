@@ -7,28 +7,18 @@ degrading accuracy/latency.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 
 from scribe import config
+from scribe.asr.types import FinalResult, GpuUnavailableError
 from scribe.diagnostics import cuda_env
 from scribe.models import whisper_download_root
 
-
-class GpuUnavailableError(RuntimeError):
-    pass
-
-
-@dataclass
-class FinalResult:
-    text: str
-    avg_logprob: float
-    no_speech_prob: float
-    compression_ratio: float
+__all__ = ["FinalResult", "GpuUnavailableError", "WhisperFinal"]
 
 
 class WhisperFinal:
+    remote = False
     def __init__(
         self,
         model: str = config.WHISPER_MODEL,
@@ -74,6 +64,10 @@ class WhisperFinal:
             ) from e
         self.beam_size = beam_size
         self.hotwords = hotwords
+        self.label = f"GPU · {model}"
+
+    def set_draining(self) -> None:
+        """Remote backends shorten their deadline at shutdown; nothing to do on the GPU."""
 
     def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> FinalResult:
         segments, _info = self.model.transcribe(

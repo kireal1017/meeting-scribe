@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import threading
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -19,70 +20,123 @@ from scribe.models import DEFAULT_PARTIAL_MODEL
 
 
 class Engines(QObject):
-    """Loads sherpa (CPU) + Whisper (GPU) once at startup and keeps them for every session.
-    The final (Whisper) model can be swapped later without reloading the draft model."""
+    """Loads sherpa (CPU) + the final-pass backend once at startup and keeps them for every
+    session. The backend is fixed by a FinalSpec (local GPU Whisper or an external API) and only
+    changes through switch_final(), i.e. an explicit user choice; errors never switch it."""
 
     ready = Signal()
-    failed = Signal(str, bool)  # message, is_gpu_problem
+    failed = Signal(str, str)  # message, kind: "gpu" | "api" | "other"
 
     def __init__(self, partial_model: str = DEFAULT_PARTIAL_MODEL,
-                 final_model: str = config.WHISPER_MODEL) -> None:
+                 final_model: str = config.WHISPER_MODEL, spec=None) -> None:
+        from scribe.asr.backends import FinalSpec
+
         super().__init__()
         self.partial_model = partial_model
-        self.final_model = final_model
+        self.spec = spec if spec is not None else FinalSpec("local", final_model)
+        self.spec_error: Exception | None = None  # settings could not be turned into a spec
         self.sherpa = None
-        self.whisper = None
+        self.final = None
         self.embedder = None  # speaker voice embeddings (remote participants A..J)
+
+    @classmethod
+    def from_settings(cls, s, partial_model: str = DEFAULT_PARTIAL_MODEL) -> Engines:
+        """A broken backend setting does not stop the draft model from loading: the error is
+        reported by load() and the user picks a backend again (nothing falls back silently)."""
+        from scribe.asr.backends import spec_from_settings
+
+        try:
+            return cls(partial_model, spec=spec_from_settings(s))
+        except Exception as e:
+            engines = cls(partial_model, final_model=s.final_model)
+            engines.spec, engines.spec_error = None, e
+            return engines
+
+    # older names, kept for callers/tests written before external APIs existed
+    @property
+    def whisper(self):
+        return self.final
+
+    @whisper.setter
+    def whisper(self, value) -> None:
+        self.final = value
+
+    @property
+    def final_model(self) -> str:
+        return self.spec.model if self.spec else ""
+
+    @final_model.setter
+    def final_model(self, model: str) -> None:
+        self.spec = replace(self.spec, model=model)
+
+    @property
+    def remote(self) -> bool:
+        return bool(self.spec and self.spec.remote)
 
     def load(self) -> None:
         threading.Thread(target=self._load, name="engine-load", daemon=True).start()
 
-    def switch_final(self, model: str) -> None:
-        """Replace the Whisper model (only while no session is running)."""
-        self.final_model = model
+    def switch_final(self, spec) -> None:
+        """Replace the final backend (only while no session is running). Accepts a FinalSpec or
+        a local Whisper model name."""
+        from scribe.asr.backends import FinalSpec
+
+        self.spec = spec if isinstance(spec, FinalSpec) else FinalSpec("local", spec)
+        self.spec_error = None
         threading.Thread(target=self._switch, name="engine-switch", daemon=True).start()
 
-    def _load_whisper(self):
-        from scribe.asr.whisper_final import WhisperFinal
+    def _build_final(self):
+        from scribe.asr.backends import create_final
 
-        w = WhisperFinal(model=self.final_model)
-        # cuBLAS/cuDNN warm-up (~2 s) during loading, so the first confirmed sentence of the
-        # meeting is not delayed by it
-        w.transcribe(np.zeros(16_000, np.float32))
-        return w
+        if self.spec is None:
+            raise self.spec_error or RuntimeError("확정 자막 엔진이 정해지지 않았습니다.")
+        final = create_final(self.spec)
+        if not getattr(final, "remote", False):
+            # cuBLAS/cuDNN warm-up (~2 s) during loading, so the first confirmed sentence of the
+            # meeting is not delayed by it. Never for an API: that would upload on every start.
+            final.transcribe(np.zeros(16_000, np.float32))
+        return final
 
     def _report(self, exc: BaseException) -> None:
-        from scribe.asr.whisper_final import GpuUnavailableError
+        from scribe.asr.types import (
+            ApiAuthError,
+            ApiConfigError,
+            ApiRequestError,
+            ApiTransientError,
+            GpuUnavailableError,
+        )
 
         if isinstance(exc, GpuUnavailableError):
-            self.failed.emit(str(exc), True)
+            self.failed.emit(str(exc), "gpu")
+        elif isinstance(exc, (ApiConfigError, ApiAuthError, ApiRequestError, ApiTransientError)):
+            self.failed.emit(str(exc), "api")
         else:
             self.failed.emit("".join(traceback.format_exception(type(exc), exc,
-                                                                exc.__traceback__)), False)
+                                                                exc.__traceback__)), "other")
+
+    def _load_cpu_models(self, errors: list[BaseException]) -> None:
+        try:
+            from scribe.asr.sherpa_stream import SherpaStreaming
+
+            self.sherpa = SherpaStreaming(self.partial_model)
+            from scribe.diarize import SherpaEmbedder
+            from scribe.models import speaker_model_path
+
+            self.embedder = SherpaEmbedder(speaker_model_path())
+        except BaseException as e:  # reported on the loader thread
+            errors.append(e)
 
     def _load(self) -> None:
-        """The draft model (CPU, ~9 s: ONNX graph parsing) and Whisper (GPU, ~7 s: CUDA init +
-        weights) are independent, so they load in parallel instead of back to back."""
-        from scribe.asr.sherpa_stream import SherpaStreaming
-
+        """The draft model (CPU, ~9 s: ONNX graph parsing) and the final backend (GPU Whisper
+        ~7 s: CUDA init + weights; an API backend: instant, no network) load in parallel."""
         errors: list[BaseException] = []
-
-        def load_sherpa() -> None:
-            try:
-                self.sherpa = SherpaStreaming(self.partial_model)
-                from scribe.diarize import SherpaEmbedder
-                from scribe.models import speaker_model_path
-
-                self.embedder = SherpaEmbedder(speaker_model_path())
-            except BaseException as e:  # reported below on the loader thread
-                errors.append(e)
-
-        t = threading.Thread(target=load_sherpa, name="sherpa-load", daemon=True)
+        t = threading.Thread(target=self._load_cpu_models, args=(errors,), name="sherpa-load",
+                             daemon=True)
         t.start()
         try:
-            self.whisper = self._load_whisper()
+            self.final = self._build_final()
         except Exception as e:
-            t.join()
+            t.join()  # the draft model still loads, so fixing the backend needs no restart
             self._report(e)
             return
         t.join()
@@ -93,12 +147,18 @@ class Engines(QObject):
 
     def _switch(self) -> None:
         # free the old model first: two large Whisper models do not fit in 4 GB of VRAM
-        self.whisper = None
+        self.final = None
         gc.collect()
+        errors: list[BaseException] = []
+        if self.sherpa is None or self.embedder is None:  # startup failed before: finish it
+            self._load_cpu_models(errors)
         try:
-            self.whisper = self._load_whisper()
+            self.final = self._build_final()
         except Exception as e:
             self._report(e)
+            return
+        if errors:
+            self._report(errors[0])
             return
         self.ready.emit()
 
@@ -108,13 +168,20 @@ class Engines(QObject):
 
         return SpeakerTracker(self.embedder) if self.embedder is not None else None
 
-    def whisper_factory(self):
-        """Hand the preloaded model to a session once; a restart after a GPU error builds a
-        fresh one (the session frees the broken one first, so we must not keep a reference)."""
-        from scribe.asr.whisper_final import WhisperFinal
+    def final_factory(self):
+        """Hand the preloaded backend to a session once; a restart after a GPU error builds a
+        fresh one of the *same* spec (the session frees the broken one first, so we must not
+        keep a reference)."""
+        from scribe.asr.backends import create_final
 
-        w, self.whisper = self.whisper, None
-        return w or WhisperFinal(model=self.final_model)
+        f, self.final = self.final, None
+        if f is not None:
+            return f
+        if self.spec is None:
+            raise self.spec_error or RuntimeError("확정 자막 엔진이 정해지지 않았습니다.")
+        return create_final(self.spec)
+
+    whisper_factory = final_factory  # older name
 
 
 class SessionRunner(QObject):
@@ -167,15 +234,15 @@ class SessionRunner(QObject):
 
         md = ""
         try:
-            self.session = Session(sources, self.engines.whisper_factory, self.engines.sherpa,
+            self.session = Session(sources, self.engines.final_factory, self.engines.sherpa,
                                    silero_vad_path(), out_dir, hotwords=hotwords, record=record,
                                    speakers=self.engines.new_speaker_tracker())
             md = str(self.session.run(self.event.emit))
         except Exception:
             self.error.emit(traceback.format_exc())
         finally:
-            if self.session is not None and self.session.whisper is not None:
-                self.engines.whisper = self.session.whisper  # keep the model for the next one
+            if self.session is not None and self.session.final is not None:
+                self.engines.final = self.session.final  # keep the backend for the next one
             self.session = None
             self._active = False  # before emitting, so handlers see "not running"
             self.finished.emit(md)

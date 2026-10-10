@@ -1,8 +1,9 @@
-"""Wires sources -> VAD -> (sherpa partials, whisper finals) -> events.
+"""Wires sources -> VAD -> (sherpa partials, finals from GPU Whisper or an external API) -> events.
 
 Threads:
   one ChannelWorker per audio source (record FLAC, VAD, sherpa partial decoding — all CPU)
-  one FinalWorker shared by all channels (Whisper on the GPU; 4 GB VRAM fits one model)
+  one FinalWorker shared by all channels (Whisper on the GPU — 4 GB VRAM fits one model —
+  or the external API the user chose; never switched automatically)
   the caller's thread drains the event queue (store + UI) in Session.run()
 """
 
@@ -20,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from scribe.asr.filters import FinalFilter
+from scribe.asr.types import ApiAuthError, ApiConfigError
 from scribe.audio.mixdown import mixdown
 from scribe.audio.recorder import FlacRecorder
 from scribe.config import SAMPLE_RATE
@@ -35,6 +37,7 @@ from scribe.vad.segmenter import (
 )
 
 BACKLOG_WARN_S = 20.0
+REMOTE_STRIKES = 3  # consecutive API failures before finals halt
 PROMPT_TAIL_CHARS = 100
 
 
@@ -53,7 +56,7 @@ class Session:
     def __init__(
         self,
         sources: dict[str, Iterable[np.ndarray]],
-        whisper_factory: Callable[[], object],
+        final_factory: Callable[[], object],
         sherpa,
         vad_path: Path,
         session_dir: Path,
@@ -62,11 +65,14 @@ class Session:
         record: bool = True,
         speakers=None,
     ) -> None:
-        """record: keep per-channel FLAC + a mixed "전체 녹음.flac" at the end.
+        """final_factory: builds the final-pass backend (GPU Whisper or an external API) — always
+        the same kind; a restart after an error never switches to another backend.
+        record: keep per-channel FLAC + a mixed "전체 녹음.flac" at the end.
         speakers: a SpeakerTracker labelling remote participants A..J (None = no labels)."""
         self.sources = sources
-        self.whisper_factory = whisper_factory
-        self.whisper = whisper_factory()
+        self.final_factory = final_factory
+        self.final = final_factory()
+        self._halted = False
         self.sherpa = sherpa
         self.vad_path = vad_path
         self.dir = session_dir
@@ -164,7 +170,14 @@ class Session:
             self._paused.clear()
             self._status("all", "기록 재개", paused=False)
 
+    @property
+    def whisper(self):  # older name of `final`
+        return self.final
+
     def stop(self) -> None:
+        draining = getattr(self.final, "set_draining", None)
+        if draining:  # an API backend shortens its per-request deadline for the queued tail
+            draining()
         for src in self.sources.values():
             stop = getattr(src, "stop", None)
             if stop:
@@ -223,7 +236,7 @@ class Session:
             for ev in seg.flush():
                 handle(ev)
         except Exception:
-            self._status(channel, "오디오 처리 오류", error=traceback.format_exc())
+            self._status(channel, "오디오 처리 오류", error=traceback.format_exc(), callout=True)
         finally:
             if rec:
                 rec.close()
@@ -245,6 +258,7 @@ class Session:
 
     def _final_worker(self) -> None:
         reinit_used = False
+        strikes = 0  # consecutive API failures
         while True:
             job = self.jobs.get()
             if job is None:
@@ -252,32 +266,39 @@ class Session:
             with self._backlog_lock:
                 self._backlog_s -= len(job.audio) / SAMPLE_RATE
                 backlog = self._backlog_s
-            if self.whisper is None:
-                continue  # GPU halted: drafts + FLAC keep going, finals come from re-transcription
+            if self._halted:
+                continue  # finals stopped: drafts + FLAC keep going
             if backlog > BACKLOG_WARN_S:
                 self._status(job.channel, f"확정 자막 지연: 대기 {backlog:.0f}초", backlog_s=backlog)
             t0 = time.monotonic()
             try:
-                res = self.whisper.transcribe(job.audio, prompt=self._prompt(job.channel))
+                res = self.final.transcribe(job.audio, prompt=self._prompt(job.channel))
             except Exception as e:
-                self._status(job.channel, f"GPU 전사 오류: {e}", error=traceback.format_exc())
+                if getattr(self.final, "remote", False):
+                    strikes += 1
+                    self._remote_failure(job, e, strikes)
+                    continue
+                self._status(job.channel, f"GPU 전사 오류: {e}", error=traceback.format_exc(),
+                             callout=True)
                 # free the failed model first: two copies do not fit in 4 GB of VRAM
-                self.whisper = None
+                self.final = None
                 gc.collect()
                 if not reinit_used:  # one restart attempt; the FLAC keeps the audio regardless
                     reinit_used = True
                     try:
-                        self.whisper = self.whisper_factory()
+                        self.final = self.final_factory()  # same backend, never another one
                         self._status(job.channel, "Whisper 재시작 완료")
                         continue
                     except Exception as e2:
-                        self._status(job.channel, f"Whisper 재시작 실패: {e2}")
+                        self._status(job.channel, f"Whisper 재시작 실패: {e2}", callout=True)
                 # no CPU fallback: halt finals once, loudly
+                self._halted = True
                 self._status(job.channel, "GPU 확정 자막 중단 — 녹음과 임시 자막은 계속됩니다. "
                              "회의 후 `scribe doctor`를 실행해 주세요.", halted=True)
                 continue
+            strikes = 0
             infer_s = time.monotonic() - t0
-            reason = self.filter.check(res)
+            reason = self.filter.check(res, draft=job.draft)
             text = "" if reason else res.text
             if text:
                 self._last_final[job.channel] = text
@@ -290,10 +311,28 @@ class Session:
             self._emit(
                 type="final", segment_id=segment_id(job.channel, job.index), channel=job.channel,
                 t_start=job.start / SAMPLE_RATE, t_end=job.end / SAMPLE_RATE, text=text,
-                engine="whisper",
+                # local finals keep engine="whisper"; an API final names its provider/model
+                engine=self.final.label if getattr(self.final, "remote", False) else "whisper",
                 meta={"draft": job.draft, "rejected": reason, "infer_s": round(infer_s, 3),
                       "speaker": speaker,
                       "queue_s": round(t0 - job.queued_mono, 3),
                       "avg_logprob": round(res.avg_logprob, 3),
-                      "no_speech_prob": round(res.no_speech_prob, 3)},
+                      "no_speech_prob": round(res.no_speech_prob, 3),
+                      **(res.meta or {})},
             )
+
+    def _remote_failure(self, job: FinalJob, exc: Exception, strikes: int) -> None:
+        """An API request failed: keep a marked gap (the draft stays visible as "확정 실패"),
+        never substitute another engine. Wrong key/model halts at once; otherwise 3 failures
+        in a row do (a success in between resets the count)."""
+        self._emit(type="final", segment_id=segment_id(job.channel, job.index),
+                   channel=job.channel, t_start=job.start / SAMPLE_RATE,
+                   t_end=job.end / SAMPLE_RATE, text="", engine=getattr(self.final, "label", ""),
+                   meta={"draft": job.draft, "rejected": "api-error", "api_error": str(exc)})
+        if strikes == 1:
+            self._status(job.channel, f"외부 API 응답 실패: {exc}", callout=True)
+        if isinstance(exc, (ApiAuthError, ApiConfigError)) or strikes >= REMOTE_STRIKES:
+            self._halted = True
+            self._status(job.channel, "외부 API 확정 자막 중단 — 임시 자막과 녹음은 계속됩니다. "
+                         f"설정에서 API 키·모델·사용 한도를 확인해 주세요. ({exc})",
+                         halted=True, remote=True)

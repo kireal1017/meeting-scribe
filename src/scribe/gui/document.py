@@ -30,7 +30,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QTextBrowser, QTextEdit
 
 from scribe.gui import theme
-from scribe.store.transcript import clock, display_name, row_speaker_key, speaker_key
+from scribe.store.transcript import (
+    clock,
+    display_name,
+    is_failed,
+    row_speaker_key,
+    speaker_key,
+)
 
 GUTTER = 120  # px: timestamp + speaker chip column
 PAGE_WIDTH = 820  # px: text column, like a Notion page
@@ -88,8 +94,11 @@ class TranscriptView(QTextBrowser):
         self._started = started
         self._duration_s: float | None = None
         self._speakers: list[str] = []  # speaker keys in order of first appearance
-        self._finals: list[tuple[str, str, float, str]] = []  # (key, channel, t, text)
-        self._count = 0
+        # (key, channel, t, text, failed): failed = the external API could not confirm it; the
+        # draft text is kept as a marked gap ("확정 실패"), never counted as an utterance
+        self._finals: list[tuple[str, str, float, str, bool]] = []
+        self._count = 0  # confirmed utterances (발언 N개)
+        self._blocks = 0  # blocks in the confirmed region (utterances + failed gaps)
         self._last_speaker: str | None = None
         self._drafts: dict[str, Draft] = {}
         self._placeholder: str | None = None
@@ -157,8 +166,33 @@ class TranscriptView(QTextBrowser):
         self._insert_utterance(c, key, t_start, text, show_chip=key != self._last_speaker,
                                draft=False)
         self._last_speaker = key
-        self._finals.append((key, channel, t_start, text))
+        self._finals.append((key, channel, t_start, text, False))
         self._count += 1
+        self._blocks += 1
+        self._after_confirmed(channel, live, follow)
+
+    def add_failed(self, channel: str, t_start: float, draft: str, live: bool = True) -> None:
+        """The external API could not confirm this utterance: keep what the draft heard, marked
+        "확정 실패". No speaker chip (unknown), not counted as an utterance."""
+        follow = live and self._at_end()
+        c = QTextCursor(self.document())
+        c.setPosition(self._draft_pos())
+        fmt = self._utterance_format(show_chip=True)
+        c.insertBlock(fmt)
+        meta_px = 12 if self.compact else 13
+        c.insertText(clock(t_start), _char(meta_px, theme.INK_FAINT))
+        c.insertText("  ", _char(meta_px, theme.INK_FAINT))
+        tag = _char(meta_px, theme.WARN_TEXT, QFont.Weight.DemiBold, theme.WARN_BG)
+        tag.setToolTip("외부 API가 이 문장을 확정하지 못했습니다. 회색 글자는 임시 자막입니다.")
+        c.insertText(" 확정 실패 ", tag)
+        c.insertText(" " if self.compact else "\t", _char(16, theme.INK))
+        c.insertText(draft or "(임시 자막 없음)", _char(15 if self.compact else 16, theme.INK_FAINT))
+        self._finals.append(("", channel, t_start, draft, True))
+        self._blocks += 1
+        self._last_speaker = None  # the next confirmed line names its speaker again
+        self._after_confirmed(channel, live, follow)
+
+    def _after_confirmed(self, channel: str, live: bool, follow: bool) -> None:
         if not live:  # bulk replay (load_rows / set_names): the caller refreshes once at the end
             return
         self._drafts = {ch: d for ch, d in self._drafts.items() if ch != channel}
@@ -184,15 +218,20 @@ class TranscriptView(QTextBrowser):
 
     def load_rows(self, rows: list[dict]) -> None:
         """Render a saved session (rows from transcript.jsonl)."""
-        finals = sorted((r for r in rows if r["type"] == "final" and r["text"]),
+        finals = sorted((r for r in rows if r["type"] == "final" and (r["text"] or is_failed(r))),
                         key=lambda r: r["t_start"])
         self.setUpdatesEnabled(False)
         try:
             for r in finals:
+                if not r["text"]:
+                    self.add_failed(r["channel"], r["t_start"], (r.get("meta") or {}).get("draft")
+                                    or "", live=False)
+                    continue
                 spk = row_speaker_key(r).partition(":")[2] or None
                 self.add_final(r["channel"], r["t_start"], r["text"], live=False, speaker=spk)
             self._render_drafts()
-            self.update_properties(finals[-1]["t_end"] if finals else None)
+            confirmed = [r for r in finals if r["text"]]
+            self.update_properties(confirmed[-1]["t_end"] if confirmed else None)
         finally:
             self.setUpdatesEnabled(True)
         # open at the title; deferred because the layout of a just-shown page is not final yet
@@ -209,8 +248,12 @@ class TranscriptView(QTextBrowser):
         self.setUpdatesEnabled(False)
         try:
             self.reset(title, started)
-            for key, channel, t, text in finals:
-                self.add_final(channel, t, text, live=False, speaker=key.partition(":")[2] or None)
+            for key, channel, t, text, failed in finals:
+                if failed:
+                    self.add_failed(channel, t, text, live=False)
+                else:
+                    self.add_final(channel, t, text, live=False,
+                                   speaker=key.partition(":")[2] or None)
             self._drafts, self._placeholder = drafts, placeholder
             self._render_drafts()
             self.update_properties(duration)
@@ -256,13 +299,12 @@ class TranscriptView(QTextBrowser):
 
     # --- internals --------------------------------------------------------
     def _draft_pos(self) -> int:
-        """End of the last confirmed block (header blocks + one block per final);
+        """End of the last confirmed block (header blocks + one block per final or failed gap);
         everything after it is the re-renderable draft/placeholder region."""
-        block = self.document().findBlockByNumber(HEADER_BLOCKS - 1 + self._count)
+        block = self.document().findBlockByNumber(HEADER_BLOCKS - 1 + self._blocks)
         return block.position() + block.length() - 1
 
-    def _insert_utterance(self, c: QTextCursor, key: str, t_start: float, text: str,
-                          show_chip: bool, draft: bool) -> None:
+    def _utterance_format(self, show_chip: bool) -> QTextBlockFormat:
         fmt = QTextBlockFormat()
         if not self.compact:  # hanging indent: text column starts after the gutter
             fmt.setLeftMargin(GUTTER)
@@ -272,7 +314,11 @@ class TranscriptView(QTextBrowser):
         else:
             fmt.setTopMargin(14 if show_chip else 8)
         fmt.setLineHeight(125, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
-        c.insertBlock(fmt)
+        return fmt
+
+    def _insert_utterance(self, c: QTextCursor, key: str, t_start: float, text: str,
+                          show_chip: bool, draft: bool) -> None:
+        c.insertBlock(self._utterance_format(show_chip))
         meta_px = 12 if self.compact else 13
         c.insertText("········" if draft else clock(t_start), _char(meta_px, theme.INK_FAINT))
         if show_chip:
@@ -297,7 +343,7 @@ class TranscriptView(QTextBrowser):
         c.removeSelectedText()
         for ch, d in self._drafts.items():  # who is speaking is known only once confirmed
             self._insert_utterance(c, ch, d.t_start, d.text + " …", show_chip=True, draft=True)
-        if self._placeholder and not self._count and not self._drafts:
+        if self._placeholder and not self._blocks and not self._drafts:
             fmt = QTextBlockFormat()
             fmt.setTopMargin(24)
             c.insertBlock(fmt)

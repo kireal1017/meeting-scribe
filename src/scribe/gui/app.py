@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from scribe import settings
+from scribe import config, settings
 from scribe.gui import theme
 from scribe.gui.document import TranscriptView
 from scribe.gui.engine import DoctorRunner, Engines, GpuMonitor, SessionRunner
@@ -67,17 +67,6 @@ log = logging.getLogger("scribe.gui")
 WEEKDAY = "월화수목금토일"
 LIVE = "__live__"
 IDLE_HINT = "‘기록 시작’을 누르면 연결된 스피커에서 들리는 소리를 받아적습니다."
-# final-pass choices shown in the sidebar: (label, faster-whisper model, tooltip)
-FINAL_CHOICES = [
-    ("빠름 · large-v3-turbo", "large-v3-turbo",
-     "권장. 문장 확정 약 1.5초, VRAM 약 1.3GB."),
-    ("정확 · large-v3", "large-v3",
-     "대화체 인식이 조금 더 좋을 수 있지만 문장 확정 약 3초, VRAM 최대 약 3.2GB.\n"
-     "Zoom·브라우저가 GPU를 함께 쓰면 메모리가 부족해 확정 자막이 멈출 수 있습니다.\n"
-     "처음 선택하면 모델(약 3GB)을 내려받습니다."),
-]
-
-
 def _session_label(started: datetime) -> str:
     return f"{started:%m월 %d일}({WEEKDAY[started.weekday()]}) {started:%H:%M}"
 
@@ -204,9 +193,11 @@ class MainWindow(QMainWindow):
         self.out_root = out_root
         self.setWindowTitle("meeting-scribe")
         self.settings = settings.load()
-        self.engines = Engines(final_model=self.settings.final_model)
+        self.engines = Engines.from_settings(self.settings)
         self.runner = SessionRunner(self.engines)
-        self.monitor = GpuMonitor()
+        self.monitor: GpuMonitor | None = None  # only while the final pass runs on the GPU
+        self._upload_s = 0.0  # external API usage in the current meeting
+        self._cost = 0.0
         self.started: datetime | None = None
         self.live_dir: Path | None = None
         self.shown_live_dir: Path | None = None  # meeting on the live page (kept after saving)
@@ -231,7 +222,6 @@ class MainWindow(QMainWindow):
         self.runner.event.connect(self._on_event)
         self.runner.finished.connect(self._on_finished)
         self.runner.error.connect(self._on_error)
-        self.monitor.stats.connect(self._on_gpu)
         self.tick = QTimer(self, interval=1000)
         self.tick.timeout.connect(self._on_tick)
 
@@ -241,7 +231,7 @@ class MainWindow(QMainWindow):
         self.status.setText("엔진 준비 중…")
         self._sync_controls()
         self.engines.load()
-        self.monitor.start()
+        self._update_footer_mode()
 
     # --- layout -------------------------------------------------------------
     def _build(self) -> None:
@@ -307,35 +297,14 @@ class MainWindow(QMainWindow):
         self.sessions.itemClicked.connect(self._open_item)
         folder = _button("폴더 열기", "utility")
         folder.clicked.connect(lambda: os.startfile(self.out_root))  # noqa: S606
-        settings_title = QLabel("설정", objectName="sidebarTitle")
-        settings_title.setFont(theme.font(12, QFont.Weight.DemiBold, 0.125))
-        self.record_check = QCheckBox("전체 음성 녹음 저장")
-        self.record_check.setFont(theme.font(13))
-        self.record_check.setToolTip(
-            "켜면 회의가 끝날 때 상대와 나를 합친 ‘전체 녹음.flac’을 회의록 폴더에 저장합니다.\n"
-            "끄면 음성은 저장하지 않고 회의록(글)만 남습니다.")
-        self.record_check.setChecked(self.settings.record_audio)
-        self.record_check.toggled.connect(self._on_record_toggled)
-        model_title = QLabel("확정 자막 모델")
-        model_title.setStyleSheet(f"color: {theme.INK_MUTED};")
-        model_title.setFont(theme.font(12))
-        self.model_combo = QComboBox()
-        self.model_combo.setFont(theme.font(13))
-        for i, (label, model, tip) in enumerate(FINAL_CHOICES):
-            self.model_combo.addItem(label, model)
-            self.model_combo.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
-            if model == self.settings.final_model:
-                self.model_combo.setCurrentIndex(i)
-        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.settings_btn = _button("설정", "utility")
+        self.settings_btn.setToolTip("녹음, 확정 자막 엔진(로컬 GPU / 외부 API), 모델과 API 키")
+        self.settings_btn.clicked.connect(self._open_settings)
         v.addWidget(brand)
         v.addWidget(title)
         v.addWidget(self.sessions, 1)
-        v.addWidget(settings_title)
-        v.addWidget(self.record_check)
-        v.addSpacing(2)
-        v.addWidget(model_title)
-        v.addWidget(self.model_combo)
         v.addSpacing(6)
+        v.addWidget(self.settings_btn)
         v.addWidget(folder)
         return side
 
@@ -478,23 +447,37 @@ class MainWindow(QMainWindow):
 
     # --- engine / session ---------------------------------------------------
     def _engines_ready(self) -> None:
-        log.info("engines ready")
+        log.info("engines ready (%s)", self._engine_label())
         self._engine_state = "ready"
+        self.callout.hide()
         for view in self._views():
             view.set_placeholder(IDLE_HINT)
-        self.status.setText(f"준비 완료 · 확정 모델 {self.engines.final_model}")
+        self.status.setText(f"준비 완료 · 확정 자막 {self._engine_label()}")
         self._sync_controls()
 
-    def _engines_failed(self, message: str, gpu: bool) -> None:
-        log.error("engines failed (gpu=%s): %s", gpu, message)
+    def _engine_label(self) -> str:
+        spec = self.engines.spec
+        if spec is None:
+            return "엔진 미설정"
+        if not spec.remote:
+            return f"GPU · {spec.model}"
+
+        return f"{config.API_PROVIDERS[spec.backend]['label']} · {spec.model}"
+
+    def _engines_failed(self, message: str, kind: str) -> None:
+        log.error("engines failed (%s): %s", kind, message)
         self._engine_state = "unavailable"
         self._sync_controls()
         for view in self._views():
             view.set_placeholder("엔진을 불러오지 못했습니다.")
-        if gpu and self.engines.final_model != FINAL_CHOICES[0][1]:
+        gpu = kind == "gpu"
+        if kind == "api":  # never the GPU dialog for an API problem
+            self._show_callout(f"외부 API 확정 자막을 쓸 수 없습니다: {message}\n"
+                               "왼쪽 아래 ‘설정’에서 엔진과 API 키를 확인해 주세요.")
+        elif gpu and self.engines.final_model != config.WHISPER_MODEL:
             # most likely the bigger model does not fit next to other GPU users: offer the way back
             self._show_callout(f"{self.engines.final_model} 모델을 GPU에 올리지 못했습니다 ({message}). "
-                               "왼쪽 아래 ‘확정 자막 모델’을 ‘빠름’으로 바꾸거나, GPU를 쓰는 다른 "
+                               "왼쪽 아래 ‘설정’에서 모델을 ‘빠름’으로 바꾸거나, GPU를 쓰는 다른 "
                                "프로그램을 닫고 다시 선택해 주세요.")
         elif gpu:
             self._show_callout("GPU를 사용할 수 없어 기록을 시작할 수 없습니다. "
@@ -563,8 +546,7 @@ class MainWindow(QMainWindow):
         if self.start_btn.objectName() != style:
             _restyle(self.start_btn, style)
         self.pause_btn.setVisible(state in ("recording", "paused"))
-        self.model_combo.setEnabled(state in ("idle", "unavailable"))
-        self.record_check.setEnabled(state not in ("recording", "paused", "saving"))
+        self.settings_btn.setEnabled(state in ("idle", "unavailable"))
         self.pause_btn.setText("재개" if state == "paused" else "일시중지")
         pause_style = "resume" if state == "paused" else "pause"
         if self.pause_btn.objectName() != pause_style:
@@ -572,25 +554,60 @@ class MainWindow(QMainWindow):
         elapsed = clock((datetime.now() - self.started).total_seconds()) if self.started else ""
         self.mini.set_state(state, elapsed)
 
-    def _on_model_changed(self, _index: int) -> None:
-        model = self.model_combo.currentData()
-        if model == self.engines.final_model or self.runner.running:
-            return
-        log.info("final model -> %s", model)
-        self.settings.final_model = model
-        settings.save(self.settings)
+    def _apply_engine(self, message: str) -> None:
+        """Rebuild the final backend from the saved settings — only ever on a user action."""
+        from scribe.asr.backends import spec_from_settings
+
         self.callout.hide()
+        try:
+            spec = spec_from_settings(self.settings)
+        except Exception as e:
+            self._engines_failed(str(e), "api")
+            return
         self._engine_state = "loading"
         self._sync_controls()
-        self.status.setText(f"확정 모델 변경 중: {model}… (처음이면 모델을 내려받습니다)")
+        self.status.setText(message)
         for view in self._views():
-            view.set_placeholder(f"확정 자막 모델을 {model}(으)로 바꾸는 중입니다…")
-        self.engines.switch_final(model)
+            view.set_placeholder(message)
+        self.engines.switch_final(spec)
+        self._update_footer_mode()
 
-    def _on_record_toggled(self, on: bool) -> None:
-        self.settings.record_audio = on
+    def _open_settings(self) -> None:
+        """Sidebar ‘설정’: recording and the final-pass engine. Applied only on 저장."""
+        from scribe.gui.settings_dialog import SettingsDialog
+
+        if self.runner.running:
+            return
+        dlg = SettingsDialog(self.settings, self)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        try:
+            rebuild = dlg.apply() if accepted else dlg.key_deleted and self.engines.remote
+        except Exception as e:  # e.g. the key could not be stored
+            self._show_callout(f"설정을 저장하지 못했습니다: {e}")
+            return
         settings.save(self.settings)
-        log.info("record_audio -> %s", on)
+        log.info("settings saved (backend=%s, record=%s)", self.settings.final_backend,
+                 self.settings.record_audio)
+        if rebuild:
+            self._apply_engine("확정 자막 엔진을 준비하는 중입니다…")
+
+    def _update_footer_mode(self) -> None:
+        """GPU stats only while the final pass runs on the GPU; API usage otherwise."""
+        if self.engines.remote:
+            if self.monitor is not None:
+                self.monitor.stop()
+                self.monitor = None
+            self._show_api_usage()
+        elif self.monitor is None:
+            self.monitor = GpuMonitor()
+            self.monitor.stats.connect(self._on_gpu)
+            self.monitor.start()
+
+    def _show_api_usage(self) -> None:
+        text = f"{self._engine_label()}   ·   전송 {self._upload_s / 60:.1f}분"
+        if self.engines.spec and self.engines.spec.backend == "openrouter":
+            text += f"   ·   요금 ${self._cost:.4f}"
+        self.gpu.setText(text)
 
     def _session_of(self, view: TranscriptView) -> Path | None:
         return self.archive_dir if view is self.archive else self.shown_live_dir
@@ -685,6 +702,7 @@ class MainWindow(QMainWindow):
             self._show_callout(f"저장 폴더를 만들 수 없습니다: {self.out_root} ({e})")
             return
         self._halted = False
+        self._upload_s = self._cost = 0.0
         self.callout.hide()
         for view in self._views():
             view.reset(f"회의록 {self.started:%Y-%m-%d %H:%M}", self.started, names={})
@@ -705,19 +723,26 @@ class MainWindow(QMainWindow):
             for view in self._views():
                 view.set_draft(ev.channel, ev.segment_id, ev.t_start, ev.text)
         elif ev.type == "final":
+            failed = ev.meta.get("rejected") == "api-error"
             for view in self._views():
                 if ev.text:
                     view.add_final(ev.channel, ev.t_start, ev.text,
                                    speaker=ev.meta.get("speaker"))
+                elif failed:  # the API could not confirm it: keep the draft, marked
+                    view.add_failed(ev.channel, ev.t_start, ev.meta.get("draft") or "")
                 else:
                     view.drop_draft(ev.channel, ev.segment_id)
+            if ev.meta.get("upload_s"):
+                self._upload_s += ev.meta["upload_s"]
+                self._cost += ev.meta.get("cost") or 0.0
+                self._show_api_usage()
         elif "paused" in ev.meta:
             self._sync_controls()
             self._on_tick()
         elif ev.meta.get("halted"):
             self._halted = True
             self._show_callout(ev.text)
-        elif "오류" in ev.text or "실패" in ev.text:
+        elif ev.meta.get("callout"):  # the session marks what deserves a callout (once)
             self._show_callout(ev.text)
         else:
             self.status.setText(ev.text)
@@ -749,12 +774,15 @@ class MainWindow(QMainWindow):
             view.update_properties(elapsed)
         session = self.runner.session
         backlog = session.backlog_s if session else 0.0
-        state = "GPU 중단됨" if self._halted else f"확정 대기 {backlog:.0f}초"
+        state = (("외부 API 중단됨" if self.engines.remote else "GPU 중단됨") if self._halted
+                 else f"확정 대기 {backlog:.0f}초")
         lead = "❚❚  일시중지" if self.runner.paused else "●  기록 중"
         self.status.setText(f"{lead}  {clock(elapsed)}   ·   {state}")
         self.mini.set_state(self._ui_state(), clock(elapsed))
 
     def _on_gpu(self, s) -> None:
+        if self.engines.remote:  # a reading still in flight after switching to an API
+            return
         if s is None:
             self.gpu.setText("GPU 정보를 읽을 수 없음")
             return
@@ -785,7 +813,8 @@ class MainWindow(QMainWindow):
                 return
             self.runner.stop()
             self.runner.join(15)
-        self.monitor.stop()
+        if self.monitor is not None:
+            self.monitor.stop()
         self.mini.allow_close = True
         self.mini.close()
         super().closeEvent(e)

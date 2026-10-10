@@ -43,8 +43,10 @@ def cmd_devices(_args) -> int:
 
 
 def cmd_run(args) -> int:
+    from scribe import settings
+    from scribe.asr.backends import create_final, spec_from_settings
     from scribe.asr.sherpa_stream import SherpaStreaming
-    from scribe.asr.whisper_final import GpuUnavailableError, WhisperFinal
+    from scribe.asr.types import ApiConfigError, GpuUnavailableError
     from scribe.audio.capture import FileSource, LoopbackSource, MicSource, default_devices
     from scribe.config import transcripts_dir
     from scribe.console import ConsoleView
@@ -77,23 +79,51 @@ def cmd_run(args) -> int:
             print(f"나(마이크): {mic.name}")
             sources["me"] = MicSource(mic)
 
+    saved = settings.load()
+    saved.final_backend = args.final_backend or saved.final_backend  # broken setting -> error below
+    try:
+        # one backend for the whole run, chosen here; errors never switch to another one
+        spec = spec_from_settings(
+            saved, model=args.final_model if args.final_backend == "local" else args.api_model,
+            zdr=False if args.no_zdr else None)
+    except ApiConfigError as e:
+        print(f"[중단] {e}", file=sys.stderr)
+        return 2
+
+    api_hint = "(키: GUI의 ‘설정’ 또는 MEETING_SCRIBE_<제공자>_API_KEY 환경 변수)"
+    prebuilt = []
+    if spec.remote:  # instant and offline: check the key before loading anything
+        try:
+            prebuilt.append(create_final(spec))
+        except ApiConfigError as e:
+            print(f"[중단] {e}\n{api_hint}", file=sys.stderr)
+            return 2
+
+    def make_final():
+        if prebuilt:
+            return prebuilt.pop()
+        final = create_final(spec)
+        if not final.remote:
+            final.beam_size = args.beam_size
+        return final
+
     print("sherpa-onnx(CPU) 로딩 중...")
     sherpa = SherpaStreaming(args.partial_model)
     out = out_root / datetime.now().strftime("%Y%m%d-%H%M%S")
     try:
-        print("Whisper(GPU) 로딩 중...")
-        def make_whisper():
-            return WhisperFinal(model=args.final_model, beam_size=args.beam_size)
-
-        from scribe import settings
+        print("Whisper(GPU) 로딩 중..." if not spec.remote
+              else f"확정 자막: 외부 API ({spec.backend} · {spec.model}) — 말한 구간이 전송됩니다")
         from scribe.diarize import SherpaEmbedder, SpeakerTracker
         from scribe.models import speaker_model_path
 
         tracker = SpeakerTracker(SherpaEmbedder(speaker_model_path()))  # 상대 A..J
-        session = Session(sources, make_whisper, sherpa, silero_vad_path(), out, hotwords=hotwords,
-                          record=settings.load().record_audio, speakers=tracker)
+        session = Session(sources, make_final, sherpa, silero_vad_path(), out, hotwords=hotwords,
+                          record=saved.record_audio, speakers=tracker)
     except GpuUnavailableError as e:
         print(f"\n[중단] {e}\n`uv run scribe doctor` 결과를 공유해 주세요.", file=sys.stderr)
+        return 2
+    except ApiConfigError as e:
+        print(f"\n[중단] {e}\n{api_hint}", file=sys.stderr)
         return 2
     signal.signal(signal.SIGINT, lambda *_: session.stop())
     if args.duration:
@@ -133,7 +163,7 @@ def cmd_bench(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     _enable_ansi()
     from scribe import settings
-    from scribe.config import FINAL_MODELS, WHISPER_MODEL
+    from scribe.config import FINAL_BACKENDS, FINAL_MODELS, WHISPER_MODEL
 
     saved = settings.load()
     from scribe.models import DEFAULT_PARTIAL_MODEL, PARTIAL_MODELS
@@ -152,6 +182,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--beam-size", type=int, default=3)
     r.add_argument("--final-model", choices=FINAL_MODELS, default=saved.final_model,
                    help="확정 자막 Whisper 모델 (기본: GUI에서 고른 설정)")
+    r.add_argument("--final-backend", choices=FINAL_BACKENDS,
+                   default=saved.final_backend if saved.final_backend in FINAL_BACKENDS else None,
+                   help="확정 자막 엔진: local(GPU) / openai / openrouter (기본: GUI 설정)")
+    r.add_argument("--api-model", help="외부 API 모델 ID (기본: GUI 설정)")
+    r.add_argument("--no-zdr", action="store_true",
+                   help="OpenRouter: 데이터 미보관(ZDR) 경로만 쓰는 제한을 끔")
     r.add_argument("--duration", type=float, help="N초 후 자동 종료")
     r.add_argument("--out",
                    help="결과 저장 폴더 (기본: 프로젝트의 회의록 폴더). 그 안에 <시작시각> 폴더가 생깁니다")

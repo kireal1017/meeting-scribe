@@ -16,7 +16,7 @@ class Event:
     t_start: float  # seconds since session start
     t_end: float
     text: str
-    engine: str  # "sherpa" | "whisper" | "system"
+    engine: str  # "sherpa" | "whisper" | "system" | API label ("OpenAI · whisper-1")
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

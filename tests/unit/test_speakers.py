@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from scribe.asr.whisper_final import FinalResult
+from scribe.asr.types import FinalResult
 from scribe.audio.capture import FileSource
 from scribe.audio.mixdown import FULL_RECORDING, mixdown
 from scribe.config import SAMPLE_RATE

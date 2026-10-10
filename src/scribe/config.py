@@ -48,3 +48,21 @@ WHISPER_MODEL = "large-v3-turbo"
 FINAL_MODELS = ["large-v3-turbo", "large-v3", "large-v2"]
 WHISPER_COMPUTE_TYPE = "int8_float16"
 VRAM_BUDGET_MB = 3072
+
+# External speech-to-text APIs for the final pass (opt-in, see asr/backends.py). Exactly these
+# two; the base URLs are fixed so a key can only ever be sent to its own provider.
+FINAL_BACKENDS = ["local", "openai", "openrouter"]
+API_PROVIDERS = {
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "models": ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
+        "policy_url": "https://openai.com/policies/api-data-usage-policies",
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": ["openai/whisper-large-v3-turbo", "openai/whisper-large-v3", "openai/whisper-1"],
+        "policy_url": "https://openrouter.ai/docs/guides/privacy/data-collection",
+    },
+}

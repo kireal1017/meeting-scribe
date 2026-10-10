@@ -67,6 +67,10 @@ def font(px: int, weight: QFont.Weight = QFont.Weight.Normal, tracking: float = 
     f = QFont()
     f.setFamilies(FONT_FAMILIES)
     f.setPixelSize(px)
+    if weight == QFont.Weight.DemiBold and px >= 17:
+        # Hangul has no semibold face here: from ~18px the fallback picks a face that drops
+        # strokes ("설정" -> "설징"), so large headings use the real bold face instead
+        weight = QFont.Weight.Bold
     f.setWeight(weight)
     if tracking:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, tracking)
